@@ -44,6 +44,11 @@ const Lead = sequelize.define(
       allowNull: true,
       references: { model: "lead_sources", key: "id" },
     },
+    campaign_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: { model: "campaigns", key: "id" },
+    },
     created_by: {
       type: DataTypes.INTEGER,
       allowNull: false,
