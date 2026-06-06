@@ -5,6 +5,12 @@ const { resSuccess, resError } = require("../utils/responseUtil");
 
 const LATEST_ASSIGNMENT_IDS = literal(`(SELECT MAX(id) FROM lead_assignments GROUP BY lead_id)`);
 
+const LAST_CONTACTED_AT = literal(`(
+  SELECT MAX(ln.created_at)
+  FROM lead_notes ln
+  WHERE ln.lead_id = \`Lead\`.\`id\`
+)`);
+
 const normalizePhoneDigits = (p) => (p ? String(p) : "").replace(/\D+/g, "").slice(0, 32);
 
 const SALES_LIKE_ROLES = ["sales_rep", "retention"];
@@ -44,6 +50,7 @@ const buildLatestAssignmentInclude = (
 
 const createLead = async (req, res) => {
   const t = await sequelize.transaction();
+
   try {
     const { first_name, last_name, company, email, phone, country, status_id, source_id, campaign_id, notes } =
       req.body;
@@ -110,7 +117,7 @@ const createLead = async (req, res) => {
     );
 
     if (typeof notes === "string" && notes.trim().length > 0) {
-      const note = await LeadNote.create(
+      await LeadNote.create(
         {
           lead_id: lead.id,
           author_id: req.user.id,
@@ -118,17 +125,17 @@ const createLead = async (req, res) => {
         },
         { transaction: t },
       );
-
-      await lead.update({ updated_at: note.created_at }, { transaction: t });
     }
 
     await t.commit();
     return resSuccess(res, lead, 201);
   } catch (err) {
     console.error("CreateLead Error:", err);
+
     try {
       await t.rollback();
     } catch (_) {}
+
     return resError(res, "Internal server error", 500);
   }
 };
@@ -136,6 +143,7 @@ const createLead = async (req, res) => {
 const getLeads = async (req, res) => {
   try {
     const { role, id: userId } = req.user;
+
     const {
       status_ids,
       source_ids,
@@ -193,6 +201,7 @@ const getLeads = async (req, res) => {
 
     if (search) {
       const digitsOnly = String(search).replace(/\D+/g, "");
+
       const orClauses = [
         { first_name: { [Op.like]: `%${search}%` } },
         { last_name: { [Op.like]: `%${search}%` } },
@@ -212,6 +221,7 @@ const getLeads = async (req, res) => {
 
     if (assigned_from) {
       const d = new Date(assigned_from);
+
       if (!isNaN(d)) {
         assignedFrom = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0));
       }
@@ -219,6 +229,7 @@ const getLeads = async (req, res) => {
 
     if (assigned_to) {
       const d = new Date(assigned_to);
+
       if (!isNaN(d)) {
         assignedTo = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 23, 59, 59, 999));
       }
@@ -234,11 +245,14 @@ const getLeads = async (req, res) => {
       : [];
 
     let order = [["id", "ASC"]];
+
     if (orderBy) {
       const dir = (orderDir || "ASC").toUpperCase() === "DESC" ? "DESC" : "ASC";
 
       if (orderBy === "assigned_at") {
         order = [[{ model: LeadAssignment, as: "LeadAssignments" }, "assigned_at", dir]];
+      } else if (orderBy === "last_contacted_at") {
+        order = [[LAST_CONTACTED_AT, dir]];
       } else {
         order = [[orderBy, dir]];
       }
@@ -261,6 +275,9 @@ const getLeads = async (req, res) => {
 
     const { count, rows: leads } = await Lead.findAndCountAll({
       where,
+      attributes: {
+        include: [[LAST_CONTACTED_AT, "last_contacted_at"]],
+      },
       include: [
         { model: LeadStatus, attributes: ["id", "value", "label"] },
         { model: LeadSource, attributes: ["id", "value", "label"] },
@@ -296,6 +313,9 @@ const getLeadById = async (req, res) => {
     const { id } = req.params;
 
     const lead = await Lead.findByPk(id, {
+      attributes: {
+        include: [[LAST_CONTACTED_AT, "last_contacted_at"]],
+      },
       include: [
         { model: LeadStatus, attributes: ["id", "value", "label"] },
         { model: LeadSource, attributes: ["id", "value", "label"] },
@@ -321,6 +341,7 @@ const getLeadById = async (req, res) => {
     });
 
     if (!lead) return resError(res, "Lead not found", 404);
+
     return resSuccess(res, lead);
   } catch (err) {
     console.error("GetLeadById Error:", err);
@@ -330,10 +351,12 @@ const getLeadById = async (req, res) => {
 
 const updateLead = async (req, res) => {
   const t = await sequelize.transaction();
+
   try {
     const { id } = req.params;
 
     const lead = await Lead.findByPk(id, { transaction: t });
+
     if (!lead) {
       await t.rollback();
       return resError(res, "Lead not found", 404);
@@ -409,18 +432,18 @@ const updateLead = async (req, res) => {
         notePayload.created_at = parsedNoteDateTime;
       }
 
-      const note = await LeadNote.create(notePayload, { transaction: t });
-
-      await lead.update({ updated_at: note.created_at }, { transaction: t });
+      await LeadNote.create(notePayload, { transaction: t });
     }
 
     await t.commit();
     return resSuccess(res, lead);
   } catch (err) {
     console.error("UpdateLead Error:", err);
+
     try {
       await t.rollback();
     } catch (_) {}
+
     return resError(res, "Internal server error", 500);
   }
 };
@@ -430,9 +453,11 @@ const deleteLead = async (req, res) => {
     const { id } = req.params;
 
     const lead = await Lead.findByPk(id);
+
     if (!lead) return resError(res, "Lead not found", 404);
 
     await lead.destroy();
+
     return resSuccess(res, { message: "Lead deleted successfully" });
   } catch (err) {
     console.error("DeleteLead Error:", err);
@@ -446,9 +471,11 @@ const assignLead = async (req, res) => {
     const { assignee_id } = req.body;
 
     const lead = await Lead.findByPk(id);
+
     if (!lead) return resError(res, "Lead not found", 404);
 
     const user = await User.findByPk(assignee_id);
+
     if (!user) return resError(res, "Assignee not found", 404);
 
     const assignment = await LeadAssignment.create({
@@ -469,6 +496,7 @@ const getLeadAssignments = async (req, res) => {
     const { id } = req.params;
 
     const lead = await Lead.findByPk(id);
+
     if (!lead) return resError(res, "Lead not found", 404);
 
     const assignments = await LeadAssignment.findAll({
@@ -489,6 +517,7 @@ const getLeadAssignments = async (req, res) => {
 
 const updateLeadNote = async (req, res) => {
   const t = await sequelize.transaction();
+
   try {
     const { leadId, noteId } = req.params;
     const { body } = req.body;
@@ -509,20 +538,25 @@ const updateLeadNote = async (req, res) => {
     }
 
     note.body = body.trim();
+
     await note.save({ transaction: t });
 
     const lead = await Lead.findByPk(leadId, { transaction: t });
+
     if (lead) {
-      await lead.update({ updated_at: new Date() }, { transaction: t });
+      lead.updated_by = req.user.id;
+      await lead.save({ transaction: t });
     }
 
     await t.commit();
     return resSuccess(res, note);
   } catch (err) {
     console.error("UpdateLeadNote Error:", err);
+
     try {
       await t.rollback();
     } catch (_) {}
+
     return resError(res, "Internal server error", 500);
   }
 };
@@ -545,6 +579,7 @@ const deleteLeadNote = async (req, res) => {
     }
 
     await note.destroy();
+
     return resSuccess(res, { message: "Note deleted successfully." });
   } catch (err) {
     console.error("DeleteLeadNote Error:", err);
