@@ -1,4 +1,4 @@
-const { Role, LeadStatus, LeadSource, User, Team, TeamMember, TeamManager } = require("../models");
+const { Role, LeadStatus, LeadSource, Campaign, User, Team, TeamMember, TeamManager } = require("../models");
 const { resSuccess, resError } = require("../utils/responseUtil");
 const { Op } = require("sequelize");
 
@@ -25,6 +25,17 @@ const getLeadSources = async (req, res) => {
   } catch (err) {
     console.error("Error fetching lead sources:", err);
     return resError(res, "Server error fetching lead sources.");
+  }
+};
+
+// ✅ Get all lead campaigns
+const getLeadCampaigns = async (req, res) => {
+  try {
+    const campaigns = await Campaign.findAll({ order: [["id", "ASC"]] });
+    return resSuccess(res, campaigns);
+  } catch (err) {
+    console.error("Error fetching lead campaigns:", err);
+    return resError(res, "Server error fetching lead campaigns.");
   }
 };
 
@@ -107,7 +118,7 @@ const getTeamMembers = async (req, res) => {
   }
 };
 
-// ✅ Get unassigned active sales reps
+// ✅ Get unassigned active sales reps and retention agents
 const getUnassignedSalesReps = async (req, res) => {
   try {
     const salesReps = await User.findAll({
@@ -115,7 +126,7 @@ const getUnassignedSalesReps = async (req, res) => {
       include: [
         {
           model: Role,
-          where: { value: "sales_rep" },
+          where: { value: { [Op.in]: ["sales_rep", "retention"] } },
           attributes: [],
         },
       ],
@@ -187,7 +198,7 @@ const getAssignableUsersForManager = async (req, res) => {
         include: [
           {
             model: Role,
-            where: { value: "sales_rep" },
+            where: { value: { [Op.in]: ["sales_rep", "retention"] } },
             attributes: [],
           },
           {
@@ -224,7 +235,7 @@ const getAssignableUsersForManager = async (req, res) => {
   }
 };
 
-// ✅ Get the manager(s) of the logged-in sales rep's team(s)
+// ✅ Get the manager(s) of the logged-in sales rep's or retention agent's team(s)
 const getMyManager = async (req, res) => {
   try {
     const teams = await Team.findAll({
@@ -405,6 +416,7 @@ const getAssignees = async (req, res) => {
 module.exports = {
   getLeadStatuses,
   getLeadSources,
+  getLeadCampaigns,
   getRoles,
   getManagers,
   getManagersAndAdmins,

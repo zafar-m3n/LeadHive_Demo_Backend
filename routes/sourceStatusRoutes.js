@@ -7,12 +7,20 @@ const {
   createLeadSource,
   updateLeadSource,
   deleteLeadSource,
+
   // Lead Statuses
   listLeadStatuses,
   getLeadStatus,
   createLeadStatus,
   updateLeadStatus,
   deleteLeadStatus,
+
+  // Campaigns
+  listCampaigns,
+  getCampaign,
+  createCampaign,
+  updateCampaign,
+  deleteCampaign,
 } = require("../controllers/sourceStatusController");
 const authMiddleware = require("../middlewares/authMiddleware");
 const roleMiddleware = require("../middlewares/roleMiddleware");
@@ -56,5 +64,24 @@ router.put("/lead/statuses/:id", authMiddleware, roleMiddleware(["admin"]), upda
 
 // ✅ Delete lead status (blocked if in use)
 router.delete("/lead/statuses/:id", authMiddleware, roleMiddleware(["admin"]), deleteLeadStatus);
+
+// ==============================
+// Campaign Routes (Admin only)
+// ==============================
+
+// ✅ List/search/paginate campaigns
+router.get("/lead/campaigns", authMiddleware, roleMiddleware(["admin"]), listCampaigns);
+
+// ✅ Get single campaign by id
+router.get("/lead/campaigns/:id", authMiddleware, roleMiddleware(["admin"]), getCampaign);
+
+// ✅ Create campaign
+router.post("/lead/campaigns", authMiddleware, roleMiddleware(["admin"]), createCampaign);
+
+// ✅ Update campaign
+router.put("/lead/campaigns/:id", authMiddleware, roleMiddleware(["admin"]), updateCampaign);
+
+// ✅ Delete campaign (blocked if in use)
+router.delete("/lead/campaigns/:id", authMiddleware, roleMiddleware(["admin"]), deleteCampaign);
 
 module.exports = router;

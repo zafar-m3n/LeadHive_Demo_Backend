@@ -2,6 +2,7 @@ const {
   Lead,
   LeadStatus,
   LeadSource,
+  Campaign,
   LeadAssignment,
   Team,
   TeamMember, // through table for team membership
@@ -25,6 +26,7 @@ const buildAssignmentInclude = (assigneeIdsOrNull) => {
       required: false,
     };
   }
+
   // scoped roles
   return {
     model: LeadAssignment,
@@ -42,6 +44,7 @@ const normalizeStatusBreakdown = (allStatuses, countedRows) => {
     const statusId = r.status_id ?? r["status_id"];
     map.set(String(statusId), Number(r.count || 0));
   }
+
   return allStatuses.map((s) => ({
     status_id: s.id,
     count: map.get(String(s.id)) || 0,
@@ -56,10 +59,26 @@ const normalizeSourceBreakdown = (allSources, countedRows) => {
     const sourceId = r.source_id ?? r["source_id"];
     map.set(String(sourceId), Number(r.count || 0));
   }
+
   return allSources.map((s) => ({
     source_id: s.id,
     count: map.get(String(s.id)) || 0,
     LeadSource: { id: s.id, value: s.value, label: s.label },
+  }));
+};
+
+/** Normalize breakdown so it returns ALL campaigns with zeroes where missing */
+const normalizeCampaignBreakdown = (allCampaigns, countedRows) => {
+  const map = new Map();
+  for (const r of countedRows) {
+    const campaignId = r.campaign_id ?? r["campaign_id"];
+    map.set(String(campaignId), Number(r.count || 0));
+  }
+
+  return allCampaigns.map((c) => ({
+    campaign_id: c.id,
+    count: map.get(String(c.id)) || 0,
+    Campaign: { id: c.id, value: c.value, label: c.label },
   }));
 };
 
@@ -73,9 +92,10 @@ const buildSummary = async ({
   const assignmentInclude = buildAssignmentInclude(assigneeIds);
 
   // Fetch master lists (for zero-filling)
-  const [allStatuses, allSources] = await Promise.all([
+  const [allStatuses, allSources, allCampaigns] = await Promise.all([
     LeadStatus.findAll({ attributes: ["id", "value", "label"], order: [["id", "ASC"]] }),
     LeadSource.findAll({ attributes: ["id", "value", "label"], order: [["id", "ASC"]] }),
+    Campaign.findAll({ attributes: ["id", "value", "label"], order: [["id", "ASC"]] }),
   ]);
 
   // total (distinct)
@@ -134,6 +154,15 @@ const buildSummary = async ({
   });
   const leadsBySource = normalizeSourceBreakdown(allSources, rawSourceRows);
 
+  // Breakdown by Campaign
+  const rawCampaignRows = await Lead.findAll({
+    attributes: ["campaign_id", [fn("COUNT", fn("DISTINCT", col("Lead.id"))), "count"]],
+    include: [assignmentInclude, { model: Campaign, attributes: [] }],
+    group: ["campaign_id"],
+    raw: true,
+  });
+  const leadsByCampaign = normalizeCampaignBreakdown(allCampaigns, rawCampaignRows);
+
   // Recent leads list
   const recentLeads = await Lead.findAll({
     attributes: ["id", "first_name", "last_name", "email", "company", "created_at"],
@@ -141,6 +170,7 @@ const buildSummary = async ({
       assignmentInclude,
       { model: LeadStatus, attributes: ["id", "value", "label"] },
       { model: LeadSource, attributes: ["id", "value", "label"] },
+      { model: Campaign, attributes: ["id", "value", "label"] },
     ],
     order: [["created_at", "DESC"]],
     limit: recentLimit,
@@ -150,6 +180,7 @@ const buildSummary = async ({
     totalLeads,
     leadsByStatus,
     leadsBySource,
+    leadsByCampaign,
     recentLeads,
     ...(includeAdminKPIs ? { unassignedLeads, newThisWeek } : {}),
   };
@@ -163,6 +194,7 @@ const resolveManagerAssignees = async (managerId) => {
     attributes: ["team_id"],
     raw: true,
   });
+
   const teamIds = tmRows.map((r) => r.team_id);
   if (teamIds.length === 0) return [managerId];
 
@@ -189,12 +221,14 @@ const resolveManagerAssignees = async (managerId) => {
 const getAdminSummary = async (req, res) => {
   try {
     const recentLimit = Number(req.query.recentLimit) > 0 ? Number(req.query.recentLimit) : 10;
+
     const data = await buildSummary({
       assigneeIds: null, // admin sees all
       recentLimit,
       includeAdminKPIs: true,
       adminUserId: req.user.id,
     });
+
     return resSuccess(res, data);
   } catch (err) {
     console.error("Dashboard Admin Summary Error:", err);
@@ -300,6 +334,7 @@ const getManagerSummary = async (req, res) => {
       include: [
         { model: LeadStatus, attributes: ["id", "value", "label"] },
         { model: LeadSource, attributes: ["id", "value", "label"] },
+        { model: Campaign, attributes: ["id", "value", "label"] },
       ],
       order: [["created_at", "DESC"]],
       limit: recentLimit,
@@ -319,6 +354,7 @@ const getManagerSummary = async (req, res) => {
 
 /**
  * GET /api/v1/dashboard/summary/sales_rep?recentLimit=8
+ * This same controller can also be used for retention agents.
  */
 const getSalesRepSummary = async (req, res) => {
   try {
@@ -340,9 +376,10 @@ const getSalesRepSummary = async (req, res) => {
     `);
 
     // Master lists (for zero-filling + metadata)
-    const [allStatuses, allSources] = await Promise.all([
+    const [allStatuses, allSources, allCampaigns] = await Promise.all([
       LeadStatus.findAll({ attributes: ["id", "value", "label"], order: [["id", "ASC"]] }),
       LeadSource.findAll({ attributes: ["id", "value", "label"], order: [["id", "ASC"]] }),
+      Campaign.findAll({ attributes: ["id", "value", "label"], order: [["id", "ASC"]] }),
     ]);
 
     // Find the numeric status_id for 'new' (case-insensitive)
@@ -384,7 +421,7 @@ const getSalesRepSummary = async (req, res) => {
     });
     const avgAgeDays = Number(avgAgeRow?.avg_days || 0);
 
-    // ---------- Breakdown: by Status / by Source ----------
+    // ---------- Breakdown: by Status / by Source / by Campaign ----------
     const rawStatusRows = await Lead.findAll({
       attributes: ["status_id", [fn("COUNT", literal("*")), "count"]],
       where: { id: { [Op.in]: latestAssignedToMeLeadIds } },
@@ -399,6 +436,13 @@ const getSalesRepSummary = async (req, res) => {
       raw: true,
     });
 
+    const rawCampaignRows = await Lead.findAll({
+      attributes: ["campaign_id", [fn("COUNT", literal("*")), "count"]],
+      where: { id: { [Op.in]: latestAssignedToMeLeadIds } },
+      group: ["campaign_id"],
+      raw: true,
+    });
+
     // zero-fill + attach metadata
     const statusCountMap = new Map(rawStatusRows.map((r) => [String(r.status_id), Number(r.count || 0)]));
     const byStatus = allStatuses.map((s) => ({
@@ -410,12 +454,23 @@ const getSalesRepSummary = async (req, res) => {
     const sourceCountMap = new Map(
       rawSourceRows
         .filter((r) => r.source_id != null) // ignore NULL sources in breakdown
-        .map((r) => [String(r.source_id), Number(r.count || 0)])
+        .map((r) => [String(r.source_id), Number(r.count || 0)]),
     );
     const bySource = allSources.map((s) => ({
       source_id: s.id,
       count: sourceCountMap.get(String(s.id)) || 0,
       LeadSource: { id: s.id, value: s.value, label: s.label },
+    }));
+
+    const campaignCountMap = new Map(
+      rawCampaignRows
+        .filter((r) => r.campaign_id != null) // ignore NULL campaigns in breakdown
+        .map((r) => [String(r.campaign_id), Number(r.count || 0)]),
+    );
+    const byCampaign = allCampaigns.map((c) => ({
+      campaign_id: c.id,
+      count: campaignCountMap.get(String(c.id)) || 0,
+      Campaign: { id: c.id, value: c.value, label: c.label },
     }));
 
     // ---------- Recent assigned to me (latest assignment per lead) ----------
@@ -432,6 +487,7 @@ const getSalesRepSummary = async (req, res) => {
           include: [
             { model: LeadStatus, attributes: ["id", "value", "label"] },
             { model: LeadSource, attributes: ["id", "value", "label"] },
+            { model: Campaign, attributes: ["id", "value", "label"] },
           ],
         },
       ],
@@ -446,6 +502,7 @@ const getSalesRepSummary = async (req, res) => {
       include: [
         { model: LeadStatus, attributes: ["id", "value", "label"] },
         { model: LeadSource, attributes: ["id", "value", "label"] },
+        { model: Campaign, attributes: ["id", "value", "label"] },
       ],
       order: [["updated_at", "DESC"]],
       limit: recentLimit,
@@ -478,6 +535,7 @@ const getSalesRepSummary = async (req, res) => {
       totals: { assigned, newThisWeek, inboxNew, avgAgeDays },
       byStatus,
       bySource,
+      byCampaign,
       recentAssigned,
       recentUpdates,
       dailyIntakeLast14,
@@ -508,6 +566,7 @@ const getMyAssignments = async (req, res) => {
           include: [
             { model: LeadStatus, attributes: ["id", "value", "label"] },
             { model: LeadSource, attributes: ["id", "value", "label"] },
+            { model: Campaign, attributes: ["id", "value", "label"] },
           ],
         },
       ],

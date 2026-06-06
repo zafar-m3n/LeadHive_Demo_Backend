@@ -9,6 +9,7 @@ const {
   TeamManager,
   LeadSource,
   LeadStatus,
+  Campaign,
 } = require("../models");
 const { sequelize } = require("../config/database");
 const { resSuccess, resError } = require("../utils/responseUtil");
@@ -16,9 +17,11 @@ const { resSuccess, resError } = require("../utils/responseUtil");
 // Subquery: latest assignment row id per lead (re-using style in your leadController)
 const LATEST_ASSIGNMENT_IDS = literal(`(SELECT MAX(id) FROM lead_assignments GROUP BY lead_id)`);
 
+const SALES_LIKE_ROLES = ["sales_rep", "retention"];
+
 // --- Helpers ---------------------------------------------------------------
 
-// Get role value of a user (e.g., "admin" | "manager" | "sales_rep")
+// Get role value of a user (e.g., "admin" | "manager" | "sales_rep" | "retention")
 async function getUserRoleValue(userId) {
   const u = await User.findByPk(userId, {
     include: [{ model: Role, attributes: ["value"] }],
@@ -28,7 +31,7 @@ async function getUserRoleValue(userId) {
   return u?.Role?.value || null;
 }
 
-// Manager scope check: is a given sales rep in ANY team managed by this manager?
+// Manager scope check: is a given sales/retention agent in ANY team managed by this manager?
 async function isRepUnderManager(managerId, repId) {
   // team ids this manager manages
   const teamsManaged = await TeamManager.findAll({
@@ -76,7 +79,7 @@ async function getLatestAssignmentsMap(leadIds) {
  * Body: { lead_ids: number[], assignee_id: number, overwrite?: boolean }
  * Rules:
  *  - admin  -> assignee can be any user
- *  - manager-> assignee must be sales_rep AND within manager's teams
+ *  - manager-> assignee must be sales_rep/retention AND within manager's teams
  * Effect:
  *  - append rows to lead_assignments (no DB schema change)
  *  - if overwrite=false, skip leads whose latest assignee is someone else
@@ -85,7 +88,7 @@ const bulkAssign = async (req, res) => {
   try {
     const { lead_ids = [], assignee_id, overwrite = false, status_id } = req.body || {};
     const actorId = req.user?.id;
-    const actorRole = req.user?.role; // "admin" | "manager" | "sales_rep"
+    const actorRole = req.user?.role; // "admin" | "manager" | "sales_rep" | "retention"
 
     if (!Array.isArray(lead_ids) || !lead_ids.length) {
       return resError(res, "lead_ids[] is required.", 400);
@@ -105,11 +108,11 @@ const bulkAssign = async (req, res) => {
     if (actorRole === "admin") {
       // Admin can assign to anyone
     } else if (actorRole === "manager") {
-      if (assigneeRole !== "sales_rep") {
-        return resError(res, "Manager can only bulk-assign to sales reps.", 403);
+      if (!SALES_LIKE_ROLES.includes(assigneeRole)) {
+        return resError(res, "Manager can only bulk-assign to sales reps or retention agents.", 403);
       }
       const ok = await isRepUnderManager(actorId, assignee_id);
-      if (!ok) return resError(res, "Selected sales rep is not in your managed teams.", 403);
+      if (!ok) return resError(res, "Selected agent is not in your managed teams.", 403);
     } else {
       return resError(res, "Forbidden.", 403);
     }
@@ -169,7 +172,7 @@ const bulkAssign = async (req, res) => {
         if (status_id !== undefined && status_id !== null) {
           const [count] = await Lead.update(
             { status_id, updated_by: actorId },
-            { where: { id: { [Op.in]: idsToAffect } }, transaction: t }
+            { where: { id: { [Op.in]: idsToAffect } }, transaction: t },
           );
           statusUpdated = count;
         }
@@ -196,7 +199,7 @@ const bulkAssign = async (req, res) => {
  * GET /api/v1/leads/assignable-targets
  * Return only valid targets for the actor:
  *  - admin: active users
- *  - manager: active sales reps in any of their managed teams
+ *  - manager: active sales reps/retention agents in any of their managed teams
  */
 const getAssignableTargets = async (req, res) => {
   try {
@@ -222,11 +225,11 @@ const getAssignableTargets = async (req, res) => {
       const teamIds = managed.map((m) => m.team_id);
       if (!teamIds.length) return resSuccess(res, { role: "manager", targets: [] });
 
-      // distinct sales reps in those teams
+      // distinct sales reps/retention agents in those teams
       const reps = await User.findAll({
         where: { is_active: true },
         include: [
-          { model: Role, where: { value: "sales_rep" }, attributes: [] },
+          { model: Role, where: { value: { [Op.in]: SALES_LIKE_ROLES } }, attributes: [] },
           {
             model: Team,
             as: "memberOfTeams",
@@ -257,7 +260,7 @@ const getAssignableTargets = async (req, res) => {
  * Rules:
  *  - admin  -> may delete any of the provided leads
  *  - manager-> may delete any of the provided leads
- *  - sales_rep -> forbidden
+ *  - sales_rep/retention -> forbidden
  *
  * Effect:
  *  - Hard delete leads and their LeadAssignments (no schema change).
@@ -267,14 +270,14 @@ const bulkDeleteLeads = async (req, res) => {
   const t = await sequelize.transaction();
   try {
     const { lead_ids = [] } = req.body || {};
-    const actorRole = req.user?.role; // "admin" | "manager" | "sales_rep"
+    const actorRole = req.user?.role; // "admin" | "manager" | "sales_rep" | "retention"
 
     if (!Array.isArray(lead_ids) || lead_ids.length === 0) {
       await t.rollback();
       return resError(res, "lead_ids[] is required.", 400);
     }
 
-    if (actorRole === "sales_rep") {
+    if (SALES_LIKE_ROLES.includes(actorRole)) {
       await t.rollback();
       return resError(res, "Forbidden.", 403);
     }
@@ -378,7 +381,7 @@ const bulkUpdateStatus = async (req, res) => {
     if (idsToUpdate.length > 0) {
       const [count] = await Lead.update(
         { status_id, updated_by: actorId },
-        { where: { id: { [Op.in]: idsToUpdate } }, transaction: t }
+        { where: { id: { [Op.in]: idsToUpdate } }, transaction: t },
       );
       updated = count;
     }
@@ -450,7 +453,7 @@ const bulkUpdateSource = async (req, res) => {
     if (idsToUpdate.length > 0) {
       const [count] = await Lead.update(
         { source_id, updated_by: actorId },
-        { where: { id: { [Op.in]: idsToUpdate } }, transaction: t }
+        { where: { id: { [Op.in]: idsToUpdate } }, transaction: t },
       );
       updated = count;
     }
@@ -472,6 +475,78 @@ const bulkUpdateSource = async (req, res) => {
   }
 };
 
+const bulkUpdateCampaign = async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const { lead_ids = [], campaign_id } = req.body || {};
+    const actorId = req.user?.id;
+
+    if (!Array.isArray(lead_ids) || lead_ids.length === 0) {
+      await t.rollback();
+      return resError(res, "lead_ids[] is required.", 400);
+    }
+    if (!campaign_id) {
+      await t.rollback();
+      return resError(res, "campaign_id is required.", 400);
+    }
+
+    // Validate FK target
+    const campaign = await Campaign.findByPk(campaign_id, { transaction: t });
+    if (!campaign) {
+      await t.rollback();
+      return resError(res, "Target campaign not found.", 404);
+    }
+
+    // Load existing leads
+    const leads = await Lead.findAll({
+      where: { id: { [Op.in]: lead_ids } },
+      attributes: ["id", "campaign_id"],
+      transaction: t,
+    });
+
+    const foundIds = new Set(leads.map((l) => l.id));
+    const missing = lead_ids.filter((id) => !foundIds.has(id));
+
+    // Partition into already_set vs to_update
+    const byId = new Map(leads.map((l) => [l.id, l]));
+    const skipped = [];
+    const idsToUpdate = [];
+    for (const id of foundIds) {
+      const rec = byId.get(id);
+      if (Number(rec.campaign_id) === Number(campaign_id)) {
+        skipped.push({ id, reason: "already_set" });
+      } else {
+        idsToUpdate.push(id);
+      }
+    }
+
+    // Apply update
+    let updated = 0;
+    if (idsToUpdate.length > 0) {
+      const [count] = await Lead.update(
+        { campaign_id, updated_by: actorId },
+        { where: { id: { [Op.in]: idsToUpdate } }, transaction: t },
+      );
+      updated = count;
+    }
+
+    await t.commit();
+    return resSuccess(res, {
+      requested: lead_ids.length,
+      updated,
+      missing,
+      skipped,
+      campaign_id,
+    });
+  } catch (err) {
+    console.error("bulkUpdateCampaign Error:", err);
+    try {
+      await t.rollback();
+    } catch {}
+    return resError(res, "Bulk campaign update failed.", 500);
+  }
+};
+
 // --------------------------------------------------------------------------
 
 module.exports = {
@@ -480,4 +555,5 @@ module.exports = {
   bulkDeleteLeads,
   bulkUpdateStatus,
   bulkUpdateSource,
+  bulkUpdateCampaign,
 };

@@ -1,9 +1,9 @@
 const { Op } = require("sequelize");
-const { Lead, LeadStatus, LeadSource } = require("../models");
+const { Lead, LeadStatus, LeadSource, Campaign } = require("../models");
 const { resSuccess, resError } = require("../utils/responseUtil");
 
 function buildExportQueryParts(req) {
-  const { status_ids, source_ids } =
+  const { status_ids, source_ids, campaign_ids } =
     req.body?.filters && typeof req.body.filters === "object" ? req.body.filters : req.body || {};
 
   const where = {};
@@ -13,6 +13,7 @@ function buildExportQueryParts(req) {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
+
     if (ids.length) where.status_id = { [Op.in]: ids };
   }
 
@@ -21,12 +22,23 @@ function buildExportQueryParts(req) {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
+
     if (ids.length) where.source_id = { [Op.in]: ids };
+  }
+
+  if (campaign_ids) {
+    const ids = String(campaign_ids)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (ids.length) where.campaign_id = { [Op.in]: ids };
   }
 
   const include = [
     { model: LeadStatus, attributes: ["id", "value", "label"] },
     { model: LeadSource, attributes: ["id", "value", "label"] },
+    { model: Campaign, attributes: ["id", "value", "label"] },
   ];
 
   return { where, include };
@@ -46,7 +58,9 @@ function csvEscape(value) {
 
 function writeCsvHeader(res) {
   const header =
-    ["first_name", "last_name", "company", "email", "phone", "country", "status", "source"].join(CSV_DELIM) + CRLF;
+    ["first_name", "last_name", "company", "email", "phone", "country", "status", "source", "campaign"].join(
+      CSV_DELIM,
+    ) + CRLF;
 
   res.write("\uFEFF" + header);
 }
@@ -61,7 +75,9 @@ function leadToCsvRow(l) {
     csvEscape(l.country || ""),
     csvEscape(l?.LeadStatus?.label || ""),
     csvEscape(l?.LeadSource?.label || ""),
+    csvEscape(l?.Campaign?.label || ""),
   ];
+
   return cells.join(CSV_DELIM) + CRLF;
 }
 
@@ -118,7 +134,18 @@ const exportDownload = async (req, res) => {
         include,
         limit: PAGE_SIZE,
         offset,
-        attributes: ["id", "first_name", "last_name", "company", "email", "phone", "country", "status_id", "source_id"],
+        attributes: [
+          "id",
+          "first_name",
+          "last_name",
+          "company",
+          "email",
+          "phone",
+          "country",
+          "status_id",
+          "source_id",
+          "campaign_id",
+        ],
       });
 
       if (!rows.length) break;

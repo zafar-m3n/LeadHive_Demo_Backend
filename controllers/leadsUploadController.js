@@ -1,6 +1,6 @@
 const { Op, fn, col, where } = require("sequelize");
 const validator = require("validator");
-const { Lead, LeadStatus, LeadSource, LeadAssignment, LeadNote } = require("../models");
+const { Lead, LeadStatus, LeadSource, Campaign, LeadAssignment, LeadNote } = require("../models");
 
 const sanitizeStr = (v) =>
   v === undefined || v === null
@@ -9,14 +9,14 @@ const sanitizeStr = (v) =>
         .replace(/\u00A0/g, " ")
         .trim();
 
-const toSnakeValue = (label) => {
+const toSnakeValue = (label, maxLength = 40) => {
   if (!label) return null;
   return String(label)
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "")
-    .slice(0, 40);
+    .slice(0, maxLength);
 };
 
 const normalizePhoneDigits = (p) => (p ? String(p) : "").replace(/\D+/g, "").slice(0, 32);
@@ -24,7 +24,8 @@ const normalizePhoneDigits = (p) => (p ? String(p) : "").replace(/\D+/g, "").sli
 const importLeads = async (req, res) => {
   let t;
   try {
-    const { leads, fallback_source, is_new_source } = req.body;
+    const { leads, fallback_source, fallback_campaign, is_new_source } = req.body;
+
     if (!Array.isArray(leads) || leads.length === 0) {
       return res.status(400).json({ success: false, error: "No leads provided." });
     }
@@ -45,7 +46,7 @@ const importLeads = async (req, res) => {
     if (incomingSourceLabels.size) {
       const candidateRows = Array.from(incomingSourceLabels)
         .map((label) => ({
-          value: toSnakeValue(label),
+          value: toSnakeValue(label, 40),
           label: String(label).trim().slice(0, 80),
         }))
         .filter((r) => r.value && r.label);
@@ -67,9 +68,45 @@ const importLeads = async (req, res) => {
       }
     }
 
-    const [statuses, sources] = await Promise.all([
+    const incomingCampaignLabels = new Set();
+    for (const r of leads) {
+      const campaign = sanitizeStr(r?.campaign);
+      if (campaign) incomingCampaignLabels.add(campaign);
+    }
+
+    if (fallback_campaign) {
+      incomingCampaignLabels.add(sanitizeStr(fallback_campaign));
+    }
+
+    if (incomingCampaignLabels.size) {
+      const candidateRows = Array.from(incomingCampaignLabels)
+        .map((label) => ({
+          value: toSnakeValue(label, 80),
+          label: String(label).trim().slice(0, 120),
+        }))
+        .filter((r) => r.value && r.label);
+
+      const seenVals = new Set();
+      const uniqueRows = [];
+      for (const r of candidateRows) {
+        if (!seenVals.has(r.value)) {
+          seenVals.add(r.value);
+          uniqueRows.push(r);
+        }
+      }
+
+      if (uniqueRows.length) {
+        await Campaign.bulkCreate(uniqueRows, {
+          ignoreDuplicates: true,
+          transaction: t,
+        });
+      }
+    }
+
+    const [statuses, sources, campaigns] = await Promise.all([
       LeadStatus.findAll({ transaction: t }),
       LeadSource.findAll({ transaction: t }),
+      Campaign.findAll({ transaction: t }),
     ]);
 
     const statusMap = new Map();
@@ -84,11 +121,25 @@ const importLeads = async (req, res) => {
       if (s.label) sourceMap.set(sanitizeStr(s.label).toLowerCase(), s);
       if (s.value) sourceMap.set(sanitizeStr(s.value).toLowerCase(), s);
     }
+
     let defaultSource = null;
 
     if (fallback_source) {
       const key = sanitizeStr(fallback_source).toLowerCase();
       defaultSource = sourceMap.get(key) || null;
+    }
+
+    const campaignMap = new Map();
+    for (const c of campaigns) {
+      if (c.label) campaignMap.set(sanitizeStr(c.label).toLowerCase(), c);
+      if (c.value) campaignMap.set(sanitizeStr(c.value).toLowerCase(), c);
+    }
+
+    let defaultCampaign = null;
+
+    if (fallback_campaign) {
+      const key = sanitizeStr(fallback_campaign).toLowerCase();
+      defaultCampaign = campaignMap.get(key) || null;
     }
 
     const prepared = [];
@@ -138,6 +189,17 @@ const importLeads = async (req, res) => {
         src = defaultSource;
       }
 
+      let campaign = null;
+      const rCampaign = sanitizeStr(r.campaign).toLowerCase();
+
+      if (rCampaign) {
+        campaign = campaignMap.get(rCampaign);
+      }
+
+      if (!campaign && defaultCampaign) {
+        campaign = defaultCampaign;
+      }
+
       const noteBody = sanitizeStr(r.notes);
 
       prepared.push({
@@ -151,6 +213,7 @@ const importLeads = async (req, res) => {
         country: sanitizeStr(r.country) || null,
         status_id: st ? st.id : null,
         source_id: src ? src.id : null,
+        campaign_id: campaign ? campaign.id : null,
         _noteBody: noteBody,
         created_by: req.user?.id || null,
         updated_by: req.user?.id || null,
@@ -274,15 +337,28 @@ const importLeads = async (req, res) => {
 const getTemplateSchema = async (req, res) => {
   try {
     return res.json({
-      fields: ["first_name", "last_name", "company", "email", "phone", "country", "status", "source", "notes"],
+      fields: [
+        "first_name",
+        "last_name",
+        "company",
+        "email",
+        "phone",
+        "country",
+        "status",
+        "source",
+        "campaign",
+        "notes",
+      ],
       defaults: {
         status: "New",
         source: "Choose Fallback Source",
+        campaign: "Choose Fallback Campaign",
       },
       duplicate_check: "email_or_phone (phone compared by digits-only)",
       notes: [
         "If status is missing or invalid, 'new' is used.",
-        "If source is missing or invalid, 'facebook' is used.",
+        "If source is missing or invalid, fallback source is used when provided.",
+        "If campaign is missing or invalid, fallback campaign is used when provided.",
         "Unknown sources are created automatically (value = lowercase_with_underscores, label = original).",
         "Duplicates are detected by email OR phone; phone is normalized to digits-only for comparison.",
         "Rows with invalid email format are skipped.",

@@ -7,6 +7,7 @@ const {
   bulkDeleteLeads,
   bulkUpdateStatus,
   bulkUpdateSource,
+  bulkUpdateCampaign,
 } = require("../controllers/bulkLeadsController");
 
 const authMiddleware = require("../middlewares/authMiddleware");
@@ -20,5 +21,6 @@ router.get("/targets", roleMiddleware(["admin", "manager"]), getAssignableTarget
 router.delete("/delete", roleMiddleware(["admin", "manager"]), bulkDeleteLeads);
 router.post("/status", roleMiddleware(["admin", "manager"]), bulkUpdateStatus);
 router.post("/source", roleMiddleware(["admin", "manager"]), bulkUpdateSource);
+router.post("/campaign", roleMiddleware(["admin", "manager"]), bulkUpdateCampaign);
 
 module.exports = router;

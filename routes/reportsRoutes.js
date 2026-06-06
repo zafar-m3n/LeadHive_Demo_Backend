@@ -6,9 +6,9 @@ const roleMiddleware = require("../middlewares/roleMiddleware");
 const { getReports, getReportAgents } = require("../controllers/reportsController");
 
 // Reports data
-router.get("/", authMiddleware, roleMiddleware(["admin", "manager", "sales_rep"]), getReports);
+router.get("/", authMiddleware, roleMiddleware(["admin", "manager", "sales_rep", "retention"]), getReports);
 
 // Agents for reports filter dropdown
-router.get("/agents", authMiddleware, roleMiddleware(["admin", "manager", "sales_rep"]), getReportAgents);
+router.get("/agents", authMiddleware, roleMiddleware(["admin", "manager", "sales_rep", "retention"]), getReportAgents);
 
 module.exports = router;

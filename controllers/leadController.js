@@ -1,11 +1,13 @@
 const { Op, literal } = require("sequelize");
-const { Lead, LeadStatus, LeadSource, User, LeadAssignment, LeadNote } = require("../models");
+const { Lead, LeadStatus, LeadSource, Campaign, User, LeadAssignment, LeadNote } = require("../models");
 const { sequelize } = require("../config/database");
 const { resSuccess, resError } = require("../utils/responseUtil");
 
 const LATEST_ASSIGNMENT_IDS = literal(`(SELECT MAX(id) FROM lead_assignments GROUP BY lead_id)`);
 
 const normalizePhoneDigits = (p) => (p ? String(p) : "").replace(/\D+/g, "").slice(0, 32);
+
+const SALES_LIKE_ROLES = ["sales_rep", "retention"];
 
 const buildLatestAssignmentInclude = (
   assigneeIds = [],
@@ -43,7 +45,8 @@ const buildLatestAssignmentInclude = (
 const createLead = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const { first_name, last_name, company, email, phone, country, status_id, source_id, notes } = req.body;
+    const { first_name, last_name, company, email, phone, country, status_id, source_id, campaign_id, notes } =
+      req.body;
 
     if (!status_id) {
       await t.rollback();
@@ -91,6 +94,7 @@ const createLead = async (req, res) => {
         country,
         status_id,
         source_id,
+        campaign_id,
         created_by: req.user.id,
       },
       { transaction: t },
@@ -135,6 +139,7 @@ const getLeads = async (req, res) => {
     const {
       status_ids,
       source_ids,
+      campaign_ids,
       assignee_ids,
       orderBy,
       orderDir,
@@ -170,6 +175,19 @@ const getLeads = async (req, res) => {
 
       if (ids.length > 0) {
         where.source_id = { [Op.in]: ids };
+      }
+    }
+
+    if (campaign_ids) {
+      const ids = campaign_ids
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map(Number)
+        .filter(Boolean);
+
+      if (ids.length > 0) {
+        where.campaign_id = { [Op.in]: ids };
       }
     }
 
@@ -232,21 +250,21 @@ const getLeads = async (req, res) => {
 
     const needDateFilter = !!(assignedFrom || assignedTo);
 
-    const latestInclude =
-      role === "sales_rep"
-        ? buildLatestAssignmentInclude([userId], assignedFrom, assignedTo, true)
-        : buildLatestAssignmentInclude(
-            parsedAssigneeIds,
-            assignedFrom,
-            assignedTo,
-            needDateFilter || parsedAssigneeIds.length > 0,
-          );
+    const latestInclude = SALES_LIKE_ROLES.includes(role)
+      ? buildLatestAssignmentInclude([userId], assignedFrom, assignedTo, true)
+      : buildLatestAssignmentInclude(
+          parsedAssigneeIds,
+          assignedFrom,
+          assignedTo,
+          needDateFilter || parsedAssigneeIds.length > 0,
+        );
 
     const { count, rows: leads } = await Lead.findAndCountAll({
       where,
       include: [
         { model: LeadStatus, attributes: ["id", "value", "label"] },
         { model: LeadSource, attributes: ["id", "value", "label"] },
+        { model: Campaign, attributes: ["id", "value", "label"] },
         { model: User, as: "creator", attributes: ["id", "full_name", "email"] },
         { model: User, as: "updater", attributes: ["id", "full_name", "email"] },
         latestInclude,
@@ -281,6 +299,7 @@ const getLeadById = async (req, res) => {
       include: [
         { model: LeadStatus, attributes: ["id", "value", "label"] },
         { model: LeadSource, attributes: ["id", "value", "label"] },
+        { model: Campaign, attributes: ["id", "value", "label"] },
         { model: User, as: "creator", attributes: ["id", "full_name", "email"] },
         { model: User, as: "updater", attributes: ["id", "full_name", "email"] },
         {
@@ -320,7 +339,7 @@ const updateLead = async (req, res) => {
       return resError(res, "Lead not found", 404);
     }
 
-    if (req.user.role === "sales_rep") {
+    if (SALES_LIKE_ROLES.includes(req.user.role)) {
       const latest = await LeadAssignment.findOne({
         where: { lead_id: id },
         order: [["id", "DESC"]],
@@ -336,8 +355,19 @@ const updateLead = async (req, res) => {
       }
     }
 
-    const { first_name, last_name, company, email, phone, country, status_id, source_id, notes, note_datetime } =
-      req.body;
+    const {
+      first_name,
+      last_name,
+      company,
+      email,
+      phone,
+      country,
+      status_id,
+      source_id,
+      campaign_id,
+      notes,
+      note_datetime,
+    } = req.body;
 
     if (first_name !== undefined) lead.first_name = first_name;
     if (last_name !== undefined) lead.last_name = last_name;
@@ -347,6 +377,7 @@ const updateLead = async (req, res) => {
     if (country !== undefined) lead.country = country;
     if (status_id !== undefined) lead.status_id = status_id;
     if (source_id !== undefined) lead.source_id = source_id;
+    if (campaign_id !== undefined) lead.campaign_id = campaign_id;
 
     let parsedNoteDateTime = null;
 
