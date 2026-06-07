@@ -4,6 +4,7 @@ const colors = require("colors");
 const dotenv = require("dotenv");
 const cors = require("cors");
 const { connectDB } = require("./config/database");
+const { startLeadRetirementScheduler } = require("./schedulers/leadRetirementScheduler");
 
 // ✅ Load env variables
 dotenv.config();
@@ -41,6 +42,8 @@ const bulkLeadsRoutes = require("./routes/bulkLeadsRoutes");
 const sourceStatusRoutes = require("./routes/sourceStatusRoutes");
 const leadsExportRoutes = require("./routes/leadsExportRoutes");
 const reportsRoutes = require("./routes/reportsRoutes");
+const leadRetirementRoutes = require("./routes/leadRetirementRoutes");
+const notificationRoutes = require("./routes/notificationRoutes");
 
 // ✅ Use Routes
 app.use("/api/v1/auth", authRoutes);
@@ -54,6 +57,8 @@ app.use("/api/v1/bulk", bulkLeadsRoutes);
 app.use("/api/v1/lead", sourceStatusRoutes);
 app.use("/api/v1/leads/export", leadsExportRoutes);
 app.use("/api/v1/reports", reportsRoutes);
+app.use("/api/v1/leads/retirement", leadRetirementRoutes);
+app.use("/api/v1/notifications", notificationRoutes);
 
 // ✅ Root Route
 app.get("/", (req, res) => {
@@ -66,4 +71,5 @@ const PORT = process.env.NODE_LEADHIVE_PORT || 8080;
 // ✅ Start Server
 app.listen(PORT, () => {
   console.log(`LeadHive server running on port ${PORT} in ${process.env.NODE_LEADHIVE_MODE} mode`.bgCyan.white);
+  startLeadRetirementScheduler();
 });

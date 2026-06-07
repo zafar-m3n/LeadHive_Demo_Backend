@@ -9,6 +9,7 @@ const TeamManager = require("./TeamManager");
 const Lead = require("./Lead");
 const LeadAssignment = require("./LeadAssignment");
 const LeadNote = require("./LeadNote");
+const Notification = require("./Notification");
 
 // =============================
 // Associations
@@ -82,6 +83,10 @@ LeadNote.belongsTo(Lead, { foreignKey: "lead_id" });
 User.hasMany(LeadNote, { foreignKey: "author_id", as: "authoredNotes" });
 LeadNote.belongsTo(User, { foreignKey: "author_id", as: "author" });
 
+// --- Notifications ---
+User.hasMany(Notification, { foreignKey: "user_id", as: "notifications" });
+Notification.belongsTo(User, { foreignKey: "user_id", as: "user" });
+
 // =============================
 // Export all models
 // =============================
@@ -97,4 +102,5 @@ module.exports = {
   Lead,
   LeadAssignment,
   LeadNote,
+  Notification,
 };
