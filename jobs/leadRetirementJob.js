@@ -9,7 +9,13 @@ const CONVERTED_STATUS_ID = 11;
 const SALES_ROLE_VALUE = "sales_rep";
 const REASSIGN_ALLOWED_ROLES = ["admin", "manager"];
 
-const LATEST_ASSIGNMENT_IDS = literal(`(SELECT MAX(id) FROM lead_assignments GROUP BY lead_id)`);
+const LATEST_ASSIGNMENT_IDS = literal(`
+  (
+    SELECT MAX(id)
+    FROM lead_assignments
+    GROUP BY lead_id
+  )
+`);
 
 function getRetirementDays() {
   const days = Number(process.env.NODE_LEADHIVE_RETIREMENT_DAYS || 14);
@@ -25,6 +31,27 @@ function getCutoffDate(retirementDays) {
   return new Date(Date.now() - retirementDays * 24 * 60 * 60 * 1000);
 }
 
+function buildActivityCutoffCondition(cutoffDate) {
+  const escapedCutoffDate = sequelize.escape(cutoffDate);
+
+  return literal(`
+    COALESCE(
+      (
+        SELECT MAX(ln.created_at)
+        FROM lead_notes ln
+        WHERE ln.lead_id = \`Lead\`.\`id\`
+      ),
+      (
+        SELECT la.assigned_at
+        FROM lead_assignments la
+        WHERE la.lead_id = \`Lead\`.\`id\`
+        ORDER BY la.id DESC
+        LIMIT 1
+      )
+    ) <= ${escapedCutoffDate}
+  `);
+}
+
 async function getReassignmentUser() {
   const email = process.env.NODE_LEADHIVE_RETIREMENT_REASSIGN_EMAIL;
 
@@ -37,7 +64,12 @@ async function getReassignmentUser() {
       email: String(email).trim().toLowerCase(),
       is_active: true,
     },
-    include: [{ model: Role, attributes: ["id", "value", "label"] }],
+    include: [
+      {
+        model: Role,
+        attributes: ["id", "value", "label"],
+      },
+    ],
     attributes: ["id", "full_name", "email", "role_id", "is_active"],
   });
 
@@ -60,6 +92,7 @@ async function getEligibleRetirementLeads(cutoffDate, transaction = null) {
       status_id: {
         [Op.notIn]: [REGISTERED_STATUS_ID, CONVERTED_STATUS_ID, RETIRED_STATUS_ID],
       },
+      [Op.and]: [buildActivityCutoffCondition(cutoffDate)],
     },
     include: [
       {
@@ -69,10 +102,8 @@ async function getEligibleRetirementLeads(cutoffDate, transaction = null) {
           id: {
             [Op.in]: LATEST_ASSIGNMENT_IDS,
           },
-          assigned_at: {
-            [Op.lte]: cutoffDate,
-          },
         },
+        attributes: ["id", "lead_id", "assignee_id", "assigned_at"],
         include: [
           {
             model: User,
@@ -106,7 +137,7 @@ async function createRetirementNotification(reassignmentUser, retiredCount, reti
   await Notification.create({
     user_id: reassignmentUser.id,
     title: `${retiredCount} leads retired automatically`,
-    message: `${retiredCount} leads assigned to sales agents for ${retirementDays}+ days were retired and reassigned to you.`,
+    message: `${retiredCount} inactive leads were retired and reassigned to you after ${retirementDays}+ days without follow-up activity.`,
   });
 
   return true;
@@ -120,8 +151,6 @@ async function previewLeadRetirement() {
 
   return {
     retirement_days: retirementDays,
-    retired_status_id: RETIRED_STATUS_ID,
-    skipped_status_ids: [REGISTERED_STATUS_ID, CONVERTED_STATUS_ID, RETIRED_STATUS_ID],
     cutoff_date: cutoffDate,
     eligible_count: eligibleLeads.length,
     reassignment_user: {
@@ -137,6 +166,7 @@ async function runLeadRetirement() {
   const retirementDays = getRetirementDays();
   const cutoffDate = getCutoffDate(retirementDays);
   const reassignmentUser = await getReassignmentUser();
+  const retiredAt = new Date();
 
   const t = await sequelize.transaction();
 
@@ -152,11 +182,15 @@ async function runLeadRetirement() {
         {
           status_id: RETIRED_STATUS_ID,
           updated_by: reassignmentUser.id,
+          updated_at: retiredAt,
         },
         {
           where: {
             id: {
               [Op.in]: leadIds,
+            },
+            status_id: {
+              [Op.notIn]: [REGISTERED_STATUS_ID, CONVERTED_STATUS_ID, RETIRED_STATUS_ID],
             },
           },
           transaction: t,
@@ -171,7 +205,9 @@ async function runLeadRetirement() {
         assigned_by: reassignmentUser.id,
       }));
 
-      await LeadAssignment.bulkCreate(assignmentRows, { transaction: t });
+      await LeadAssignment.bulkCreate(assignmentRows, {
+        transaction: t,
+      });
 
       assignmentCreatedCount = assignmentRows.length;
     }
@@ -188,8 +224,6 @@ async function runLeadRetirement() {
 
     return {
       retirement_days: retirementDays,
-      retired_status_id: RETIRED_STATUS_ID,
-      skipped_status_ids: [REGISTERED_STATUS_ID, CONVERTED_STATUS_ID, RETIRED_STATUS_ID],
       cutoff_date: cutoffDate,
       eligible_count: leadIds.length,
       retired_count: retiredCount,
