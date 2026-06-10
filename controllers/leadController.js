@@ -273,24 +273,102 @@ const getLeads = async (req, res) => {
           needDateFilter || parsedAssigneeIds.length > 0,
         );
 
-    const { count, rows: leads } = await Lead.findAndCountAll({
+    const { count, rows } = await Lead.findAndCountAll({
       where,
-      attributes: {
-        include: [[LAST_CONTACTED_AT, "last_contacted_at"]],
-      },
+      attributes: ["id", "first_name", "last_name", "email", "phone", [LAST_CONTACTED_AT, "last_contacted_at"]],
       include: [
-        { model: LeadStatus, attributes: ["id", "value", "label"] },
-        { model: LeadSource, attributes: ["id", "value", "label"] },
-        { model: Campaign, attributes: ["id", "value", "label"] },
-        { model: User, as: "creator", attributes: ["id", "full_name", "email"] },
-        { model: User, as: "updater", attributes: ["id", "full_name", "email"] },
+        {
+          model: LeadStatus,
+          attributes: ["id", "value", "label"],
+        },
+        {
+          model: LeadSource,
+          attributes: ["id", "value", "label"],
+        },
+        {
+          model: Campaign,
+          attributes: ["id", "value", "label"],
+        },
         latestInclude,
+        {
+          model: LeadNote,
+          as: "notes",
+          required: false,
+          separate: true,
+          limit: 1,
+          attributes: ["id", "body"],
+          order: [
+            ["created_at", "DESC"],
+            ["id", "DESC"],
+          ],
+        },
       ],
       distinct: true,
       col: "id",
       order,
       limit: pageLimit,
       offset,
+    });
+
+    const leads = rows.map((lead) => {
+      const plainLead = lead.get({ plain: true });
+
+      const latestAssignment = Array.isArray(plainLead.LeadAssignments) ? plainLead.LeadAssignments[0] || null : null;
+
+      const latestNote = Array.isArray(plainLead.notes) ? plainLead.notes[0] || null : null;
+
+      const firstName = plainLead.first_name || "";
+      const lastName = plainLead.last_name || "";
+      const name = `${firstName} ${lastName}`.trim();
+
+      return {
+        name,
+        email: plainLead.email || null,
+        phone: plainLead.phone || null,
+        status: plainLead.LeadStatus
+          ? {
+              id: plainLead.LeadStatus.id,
+              value: plainLead.LeadStatus.value,
+              label: plainLead.LeadStatus.label,
+            }
+          : null,
+        source: plainLead.LeadSource
+          ? {
+              id: plainLead.LeadSource.id,
+              value: plainLead.LeadSource.value,
+              label: plainLead.LeadSource.label,
+            }
+          : null,
+        campaign: plainLead.Campaign
+          ? {
+              id: plainLead.Campaign.id,
+              value: plainLead.Campaign.value,
+              label: plainLead.Campaign.label,
+            }
+          : null,
+        last_contacted: plainLead.last_contacted_at || null,
+        assignee: latestAssignment?.assignee
+          ? {
+              id: latestAssignment.assignee.id,
+              full_name: latestAssignment.assignee.full_name,
+              email: latestAssignment.assignee.email,
+            }
+          : null,
+        latest_note: latestNote
+          ? {
+              id: latestNote.id,
+              body: latestNote.body,
+              created_at: latestNote.created_at,
+              author: latestNote.author
+                ? {
+                    id: latestNote.author.id,
+                    full_name: latestNote.author.full_name,
+                    email: latestNote.author.email,
+                  }
+                : null,
+            }
+          : null,
+      };
     });
 
     return resSuccess(res, {
