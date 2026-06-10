@@ -322,6 +322,7 @@ const getLeads = async (req, res) => {
       const name = `${firstName} ${lastName}`.trim();
 
       return {
+        id: plainLead.id,
         name,
         email: plainLead.email || null,
         phone: plainLead.phone || null,
@@ -466,9 +467,26 @@ const updateLead = async (req, res) => {
       status_id,
       source_id,
       campaign_id,
+      assignee_id,
       notes,
       note_datetime,
     } = req.body;
+
+    let nextStatus = null;
+    let shouldReassignToAdmin = false;
+
+    if (status_id !== undefined && status_id !== null) {
+      nextStatus = await LeadStatus.findByPk(status_id, { transaction: t });
+
+      if (!nextStatus) {
+        await t.rollback();
+        return resError(res, "Invalid status_id", 400);
+      }
+
+      const nextStatusValue = String(nextStatus.value || "").toLowerCase();
+
+      shouldReassignToAdmin = ["converted", "invalid_number"].includes(nextStatusValue);
+    }
 
     if (first_name !== undefined) lead.first_name = first_name;
     if (last_name !== undefined) lead.last_name = last_name;
@@ -476,7 +494,6 @@ const updateLead = async (req, res) => {
     if (email !== undefined) lead.email = email;
     if (phone !== undefined) lead.phone = phone;
     if (country !== undefined) lead.country = country;
-    if (status_id !== undefined) lead.status_id = status_id;
     if (source_id !== undefined) lead.source_id = source_id;
     if (campaign_id !== undefined) lead.campaign_id = campaign_id;
 
@@ -496,10 +513,68 @@ const updateLead = async (req, res) => {
       }
     }
 
+    const hasIncomingNote = typeof notes === "string" && notes.trim().length > 0;
+
+    let adminAssigningToAgent = false;
+    let targetAssignee = null;
+
+    if (assignee_id !== undefined && assignee_id !== null && assignee_id !== "") {
+      if (req.user.role !== "admin") {
+        await t.rollback();
+        return resError(res, "Only admin can assign leads from this update", 403);
+      }
+
+      targetAssignee = await User.findByPk(assignee_id, {
+        attributes: ["id", "full_name", "email", "role_id", "role"],
+        transaction: t,
+      });
+
+      if (!targetAssignee) {
+        await t.rollback();
+        return resError(res, "Assignee not found", 404);
+      }
+
+      adminAssigningToAgent = true;
+    }
+
+    if (adminAssigningToAgent && !shouldReassignToAdmin) {
+      const existingAssignmentCount = await LeadAssignment.count({
+        where: { lead_id: lead.id },
+        transaction: t,
+      });
+
+      const existingNoteCount = await LeadNote.count({
+        where: { lead_id: lead.id },
+        transaction: t,
+      });
+
+      const hasNoPreviousAssignments = existingAssignmentCount === 0;
+      const hasNoNotes = existingNoteCount === 0 && !hasIncomingNote;
+
+      if (hasNoPreviousAssignments || hasNoNotes) {
+        const assignedStatus = await LeadStatus.findOne({
+          where: { value: "assigned" },
+          transaction: t,
+        });
+
+        if (!assignedStatus) {
+          await t.rollback();
+          return resError(res, "Assigned status not found", 500);
+        }
+
+        lead.status_id = assignedStatus.id;
+      } else if (status_id !== undefined) {
+        lead.status_id = status_id;
+      }
+    } else if (status_id !== undefined) {
+      lead.status_id = status_id;
+    }
+
     lead.updated_by = req.user.id;
+
     await lead.save({ transaction: t });
 
-    if (typeof notes === "string" && notes.trim().length > 0) {
+    if (hasIncomingNote) {
       const notePayload = {
         lead_id: lead.id,
         author_id: req.user.id,
@@ -511,6 +586,45 @@ const updateLead = async (req, res) => {
       }
 
       await LeadNote.create(notePayload, { transaction: t });
+    }
+
+    if (adminAssigningToAgent && !shouldReassignToAdmin) {
+      await LeadAssignment.create(
+        {
+          lead_id: lead.id,
+          assignee_id: targetAssignee.id,
+          assigned_by: req.user.id,
+        },
+        { transaction: t },
+      );
+    }
+
+    if (shouldReassignToAdmin) {
+      const adminEmail = process.env.NODE_LEADHIVE_RETIREMENT_REASSIGN_EMAIL;
+
+      if (!adminEmail) {
+        await t.rollback();
+        return resError(res, "Retirement reassignment admin email is not configured", 500);
+      }
+
+      const adminUser = await User.findOne({
+        where: { email: adminEmail },
+        transaction: t,
+      });
+
+      if (!adminUser) {
+        await t.rollback();
+        return resError(res, "Retirement reassignment admin user not found", 404);
+      }
+
+      await LeadAssignment.create(
+        {
+          lead_id: lead.id,
+          assignee_id: adminUser.id,
+          assigned_by: req.user.id,
+        },
+        { transaction: t },
+      );
     }
 
     await t.commit();
