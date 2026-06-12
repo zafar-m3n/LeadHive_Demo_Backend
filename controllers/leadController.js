@@ -551,7 +551,7 @@ const updateLead = async (req, res) => {
       const hasNoPreviousAssignments = existingAssignmentCount === 0;
       const hasNoNotes = existingNoteCount === 0 && !hasIncomingNote;
 
-      if (hasNoPreviousAssignments || hasNoNotes) {
+      if (hasNoPreviousAssignments && hasNoNotes) {
         const assignedStatus = await LeadStatus.findOne({
           where: { value: "assigned" },
           transaction: t,

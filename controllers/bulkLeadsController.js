@@ -2,6 +2,7 @@ const { Op, literal } = require("sequelize");
 const {
   Lead,
   LeadAssignment,
+  LeadNote,
   User,
   Role,
   Team,
@@ -95,10 +96,16 @@ const bulkAssign = async (req, res) => {
     }
     if (!assignee_id) return resError(res, "assignee_id is required.", 400);
 
+    let targetStatus = null;
+    let shouldReassignToAdmin = false;
+
     // Optional: validate status if provided
     if (status_id !== undefined && status_id !== null) {
-      const status = await LeadStatus.findByPk(status_id);
-      if (!status) return resError(res, "Target status not found.", 404);
+      targetStatus = await LeadStatus.findByPk(status_id);
+      if (!targetStatus) return resError(res, "Target status not found.", 404);
+
+      const targetStatusValue = String(targetStatus.value || "").toLowerCase();
+      shouldReassignToAdmin = ["converted", "invalid_number"].includes(targetStatusValue);
     }
 
     // Validate roles
@@ -168,8 +175,79 @@ const bulkAssign = async (req, res) => {
           created += slice.length;
         }
 
-        // 2) Optional: update status for exactly those leads we just assigned
-        if (status_id !== undefined && status_id !== null) {
+        // 2) Match single-lead update behavior:
+        //    If admin assigns to an agent and the lead has no previous assignments OR no notes,
+        //    set status to "assigned".
+        if (actorRole === "admin" && !shouldReassignToAdmin && idsToAffect.length > 0) {
+          const assignedStatus = await LeadStatus.findOne({
+            where: { value: "assigned" },
+            transaction: t,
+          });
+
+          if (!assignedStatus) {
+            throw new Error("Assigned status not found");
+          }
+
+          const assignmentCounts = await LeadAssignment.findAll({
+            where: { lead_id: { [Op.in]: idsToAffect } },
+            attributes: ["lead_id", [sequelize.fn("COUNT", sequelize.col("id")), "count"]],
+            group: ["lead_id"],
+            transaction: t,
+          });
+
+          const noteCounts = await LeadNote.findAll({
+            where: { lead_id: { [Op.in]: idsToAffect } },
+            attributes: ["lead_id", [sequelize.fn("COUNT", sequelize.col("id")), "count"]],
+            group: ["lead_id"],
+            transaction: t,
+          });
+
+          const assignmentCountMap = new Map();
+          const noteCountMap = new Map();
+
+          for (const row of assignmentCounts) {
+            assignmentCountMap.set(Number(row.lead_id), Number(row.get("count") || 0));
+          }
+
+          for (const row of noteCounts) {
+            noteCountMap.set(Number(row.lead_id), Number(row.get("count") || 0));
+          }
+
+          const idsToSetAssigned = [];
+          const idsToSetProvidedStatus = [];
+
+          for (const id of idsToAffect) {
+            const assignmentCountAfterCreate = assignmentCountMap.get(Number(id)) || 0;
+            const existingAssignmentCount = Math.max(assignmentCountAfterCreate - 1, 0);
+            const existingNoteCount = noteCountMap.get(Number(id)) || 0;
+
+            const hasNoPreviousAssignments = existingAssignmentCount === 0;
+            const hasNoNotes = existingNoteCount === 0;
+
+            if (hasNoPreviousAssignments && hasNoNotes) {
+              idsToSetAssigned.push(id);
+            } else if (status_id !== undefined && status_id !== null) {
+              idsToSetProvidedStatus.push(id);
+            }
+          }
+
+          if (idsToSetAssigned.length > 0) {
+            const [count] = await Lead.update(
+              { status_id: assignedStatus.id, updated_by: actorId },
+              { where: { id: { [Op.in]: idsToSetAssigned } }, transaction: t },
+            );
+            statusUpdated += count;
+          }
+
+          if (idsToSetProvidedStatus.length > 0) {
+            const [count] = await Lead.update(
+              { status_id, updated_by: actorId },
+              { where: { id: { [Op.in]: idsToSetProvidedStatus } }, transaction: t },
+            );
+            statusUpdated += count;
+          }
+        } else if (status_id !== undefined && status_id !== null) {
+          // 3) Original optional status update behavior
           const [count] = await Lead.update(
             { status_id, updated_by: actorId },
             { where: { id: { [Op.in]: idsToAffect } }, transaction: t },

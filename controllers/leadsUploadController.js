@@ -2,6 +2,8 @@ const { Op, fn, col, where } = require("sequelize");
 const validator = require("validator");
 const { Lead, LeadStatus, LeadSource, Campaign, LeadAssignment, LeadNote } = require("../models");
 
+const BATCH_SIZE = 300;
+
 const sanitizeStr = (v) =>
   v === undefined || v === null
     ? ""
@@ -21,8 +23,17 @@ const toSnakeValue = (label, maxLength = 40) => {
 
 const normalizePhoneDigits = (p) => (p ? String(p) : "").replace(/\D+/g, "").slice(0, 32);
 
+const chunkArray = (arr, size) => {
+  const chunks = [];
+
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size));
+  }
+
+  return chunks;
+};
+
 const importLeads = async (req, res) => {
-  let t;
   try {
     const { leads, fallback_source, fallback_campaign, is_new_source } = req.body;
 
@@ -31,92 +42,107 @@ const importLeads = async (req, res) => {
     }
 
     const sequelizeInstance = Lead.sequelize;
-    t = await sequelizeInstance.transaction();
 
-    const incomingSourceLabels = new Set();
-    for (const r of leads) {
-      const src = sanitizeStr(r?.source);
-      if (src) incomingSourceLabels.add(src);
-    }
+    const setupTransaction = await sequelizeInstance.transaction();
 
-    if (fallback_source) {
-      incomingSourceLabels.add(sanitizeStr(fallback_source));
-    }
+    try {
+      const incomingSourceLabels = new Set();
 
-    if (incomingSourceLabels.size) {
-      const candidateRows = Array.from(incomingSourceLabels)
-        .map((label) => ({
-          value: toSnakeValue(label, 40),
-          label: String(label).trim().slice(0, 80),
-        }))
-        .filter((r) => r.value && r.label);
+      for (const r of leads) {
+        const src = sanitizeStr(r?.source);
+        if (src) incomingSourceLabels.add(src);
+      }
 
-      const seenVals = new Set();
-      const uniqueRows = [];
-      for (const r of candidateRows) {
-        if (!seenVals.has(r.value)) {
-          seenVals.add(r.value);
-          uniqueRows.push(r);
+      if (fallback_source) {
+        incomingSourceLabels.add(sanitizeStr(fallback_source));
+      }
+
+      if (incomingSourceLabels.size) {
+        const candidateRows = Array.from(incomingSourceLabels)
+          .map((label) => ({
+            value: toSnakeValue(label, 40),
+            label: String(label).trim().slice(0, 80),
+          }))
+          .filter((r) => r.value && r.label);
+
+        const seenVals = new Set();
+        const uniqueRows = [];
+
+        for (const r of candidateRows) {
+          if (!seenVals.has(r.value)) {
+            seenVals.add(r.value);
+            uniqueRows.push(r);
+          }
+        }
+
+        if (uniqueRows.length) {
+          await LeadSource.bulkCreate(uniqueRows, {
+            ignoreDuplicates: true,
+            transaction: setupTransaction,
+          });
         }
       }
 
-      if (uniqueRows.length) {
-        await LeadSource.bulkCreate(uniqueRows, {
-          ignoreDuplicates: true,
-          transaction: t,
-        });
+      const incomingCampaignLabels = new Set();
+
+      for (const r of leads) {
+        const campaign = sanitizeStr(r?.campaign);
+        if (campaign) incomingCampaignLabels.add(campaign);
       }
-    }
 
-    const incomingCampaignLabels = new Set();
-    for (const r of leads) {
-      const campaign = sanitizeStr(r?.campaign);
-      if (campaign) incomingCampaignLabels.add(campaign);
-    }
+      if (fallback_campaign) {
+        incomingCampaignLabels.add(sanitizeStr(fallback_campaign));
+      }
 
-    if (fallback_campaign) {
-      incomingCampaignLabels.add(sanitizeStr(fallback_campaign));
-    }
+      if (incomingCampaignLabels.size) {
+        const candidateRows = Array.from(incomingCampaignLabels)
+          .map((label) => ({
+            value: toSnakeValue(label, 80),
+            label: String(label).trim().slice(0, 120),
+          }))
+          .filter((r) => r.value && r.label);
 
-    if (incomingCampaignLabels.size) {
-      const candidateRows = Array.from(incomingCampaignLabels)
-        .map((label) => ({
-          value: toSnakeValue(label, 80),
-          label: String(label).trim().slice(0, 120),
-        }))
-        .filter((r) => r.value && r.label);
+        const seenVals = new Set();
+        const uniqueRows = [];
 
-      const seenVals = new Set();
-      const uniqueRows = [];
-      for (const r of candidateRows) {
-        if (!seenVals.has(r.value)) {
-          seenVals.add(r.value);
-          uniqueRows.push(r);
+        for (const r of candidateRows) {
+          if (!seenVals.has(r.value)) {
+            seenVals.add(r.value);
+            uniqueRows.push(r);
+          }
+        }
+
+        if (uniqueRows.length) {
+          await Campaign.bulkCreate(uniqueRows, {
+            ignoreDuplicates: true,
+            transaction: setupTransaction,
+          });
         }
       }
 
-      if (uniqueRows.length) {
-        await Campaign.bulkCreate(uniqueRows, {
-          ignoreDuplicates: true,
-          transaction: t,
-        });
-      }
+      await setupTransaction.commit();
+    } catch (err) {
+      await setupTransaction.rollback();
+      throw err;
     }
 
     const [statuses, sources, campaigns] = await Promise.all([
-      LeadStatus.findAll({ transaction: t }),
-      LeadSource.findAll({ transaction: t }),
-      Campaign.findAll({ transaction: t }),
+      LeadStatus.findAll(),
+      LeadSource.findAll(),
+      Campaign.findAll(),
     ]);
 
     const statusMap = new Map();
+
     for (const s of statuses) {
       if (s.label) statusMap.set(sanitizeStr(s.label).toLowerCase(), s);
       if (s.value) statusMap.set(sanitizeStr(s.value).toLowerCase(), s);
     }
+
     const defaultStatus = statusMap.get("new") || null;
 
     const sourceMap = new Map();
+
     for (const s of sources) {
       if (s.label) sourceMap.set(sanitizeStr(s.label).toLowerCase(), s);
       if (s.value) sourceMap.set(sanitizeStr(s.value).toLowerCase(), s);
@@ -130,6 +156,7 @@ const importLeads = async (req, res) => {
     }
 
     const campaignMap = new Map();
+
     for (const c of campaigns) {
       if (c.label) campaignMap.set(sanitizeStr(c.label).toLowerCase(), c);
       if (c.value) campaignMap.set(sanitizeStr(c.value).toLowerCase(), c);
@@ -165,16 +192,19 @@ const importLeads = async (req, res) => {
         notes.push({ index: idx, email, note: "duplicate_email_in_file" });
         return;
       }
+
       if (email) seenEmails.add(email);
 
       if (phoneNorm && seenPhones.has(phoneNorm)) {
         notes.push({ index: idx, phone: phoneRaw, note: "duplicate_phone_in_file" });
         return;
       }
+
       if (phoneNorm) seenPhones.add(phoneNorm);
 
       let st = null;
       const rStatus = sanitizeStr(r.status).toLowerCase();
+
       if (rStatus) st = statusMap.get(rStatus);
       if (!st) st = defaultStatus;
 
@@ -221,7 +251,6 @@ const importLeads = async (req, res) => {
     });
 
     if (prepared.length === 0) {
-      await t.rollback();
       return res.status(400).json({
         success: false,
         error: "No valid rows to import.",
@@ -229,88 +258,114 @@ const importLeads = async (req, res) => {
       });
     }
 
-    const emails = prepared.map((p) => p.email).filter(Boolean);
-    const phoneNorms = Array.from(new Set(prepared.map((p) => p._phoneNorm).filter(Boolean)));
+    const batches = chunkArray(prepared, BATCH_SIZE);
+    const createdLeads = [];
 
-    const whereClauses = [];
-    if (emails.length) {
-      whereClauses.push({ email: { [Op.in]: emails } });
-    }
-    if (phoneNorms.length) {
-      const normalizedDbPhone = fn("REGEXP_REPLACE", col("phone"), "[^0-9]", "");
-      whereClauses.push(where(normalizedDbPhone, { [Op.in]: phoneNorms }));
-    }
+    for (const batch of batches) {
+      const batchTransaction = await sequelizeInstance.transaction();
 
-    const existing = whereClauses.length
-      ? await Lead.findAll({
-          where: { [Op.or]: whereClauses },
-          attributes: ["email", "phone"],
-          transaction: t,
-        })
-      : [];
+      try {
+        const emails = batch.map((p) => p.email).filter(Boolean);
+        const phoneNorms = Array.from(new Set(batch.map((p) => p._phoneNorm).filter(Boolean)));
 
-    const existingEmails = new Set(
-      existing
-        .map((e) => e.email)
-        .filter(Boolean)
-        .map((e) => String(e).toLowerCase()),
-    );
+        const whereClauses = [];
 
-    const existingPhoneNorms = new Set(existing.map((e) => normalizePhoneDigits(e.phone)).filter(Boolean));
+        if (emails.length) {
+          whereClauses.push({ email: { [Op.in]: emails } });
+        }
 
-    const toInsert = [];
-    for (const p of prepared) {
-      if (p.email && existingEmails.has(p.email)) {
-        notes.push({ index: p._rowIndex, email: p.email, note: "duplicate_email_in_db" });
-        continue;
+        if (phoneNorms.length) {
+          const normalizedDbPhone = fn("REGEXP_REPLACE", col("phone"), "[^0-9]", "");
+          whereClauses.push(where(normalizedDbPhone, { [Op.in]: phoneNorms }));
+        }
+
+        const existing = whereClauses.length
+          ? await Lead.findAll({
+              where: { [Op.or]: whereClauses },
+              attributes: ["email", "phone"],
+              transaction: batchTransaction,
+            })
+          : [];
+
+        const existingEmails = new Set(
+          existing
+            .map((e) => e.email)
+            .filter(Boolean)
+            .map((e) => String(e).toLowerCase()),
+        );
+
+        const existingPhoneNorms = new Set(existing.map((e) => normalizePhoneDigits(e.phone)).filter(Boolean));
+
+        const toInsert = [];
+
+        for (const p of batch) {
+          if (p.email && existingEmails.has(p.email)) {
+            notes.push({ index: p._rowIndex, email: p.email, note: "duplicate_email_in_db" });
+            continue;
+          }
+
+          if (p._phoneNorm && existingPhoneNorms.has(p._phoneNorm)) {
+            notes.push({ index: p._rowIndex, phone: p.phone, note: "duplicate_phone_in_db" });
+            continue;
+          }
+
+          toInsert.push(p);
+        }
+
+        if (toInsert.length === 0) {
+          await batchTransaction.commit();
+          continue;
+        }
+
+        const batchCreatedLeads = await Lead.bulkCreate(
+          toInsert.map(({ _rowIndex, _phoneNorm, _noteBody, ...rest }) => rest),
+          { validate: true, returning: true, transaction: batchTransaction },
+        );
+
+        if (req.user?.id && batchCreatedLeads.length) {
+          const assignments = batchCreatedLeads.map((l) => ({
+            lead_id: l.id,
+            assignee_id: req.user.id,
+            assigned_by: req.user.id,
+          }));
+
+          await LeadAssignment.bulkCreate(assignments, { transaction: batchTransaction });
+        }
+
+        const notesPayload = [];
+
+        for (let i = 0; i < batchCreatedLeads.length; i++) {
+          const noteBody = toInsert[i]._noteBody;
+
+          if (typeof noteBody === "string" && noteBody.trim().length > 0) {
+            notesPayload.push({
+              lead_id: batchCreatedLeads[i].id,
+              author_id: req.user?.id || null,
+              body: noteBody.trim(),
+            });
+          }
+        }
+
+        if (notesPayload.length) {
+          await LeadNote.bulkCreate(notesPayload, { transaction: batchTransaction });
+        }
+
+        await batchTransaction.commit();
+
+        createdLeads.push(...batchCreatedLeads);
+      } catch (err) {
+        await batchTransaction.rollback();
+        throw err;
       }
-      if (p._phoneNorm && existingPhoneNorms.has(p._phoneNorm)) {
-        notes.push({ index: p._rowIndex, phone: p.phone, note: "duplicate_phone_in_db" });
-        continue;
-      }
-      toInsert.push(p);
     }
 
-    if (toInsert.length === 0) {
-      await t.rollback();
+    if (createdLeads.length === 0) {
       return res.status(409).json({
         success: false,
         error: "All rows are duplicates or invalid (by email/phone).",
         details: { notes },
       });
     }
-
-    const createdLeads = await Lead.bulkCreate(
-      toInsert.map(({ _rowIndex, _phoneNorm, _noteBody, ...rest }) => rest),
-      { validate: true, returning: true, transaction: t },
-    );
-
-    if (req.user?.id && createdLeads.length) {
-      const assignments = createdLeads.map((l) => ({
-        lead_id: l.id,
-        assignee_id: req.user.id,
-        assigned_by: req.user.id,
-      }));
-      await LeadAssignment.bulkCreate(assignments, { transaction: t });
-    }
-
-    const notesPayload = [];
-    for (let i = 0; i < createdLeads.length; i++) {
-      const noteBody = toInsert[i]._noteBody;
-      if (typeof noteBody === "string" && noteBody.trim().length > 0) {
-        notesPayload.push({
-          lead_id: createdLeads[i].id,
-          author_id: req.user?.id || null,
-          body: noteBody.trim(),
-        });
-      }
-    }
-
-    if (notesPayload.length) {
-      await LeadNote.bulkCreate(notesPayload, { transaction: t });
-    }
-
-    await t.commit();
 
     return res.status(201).json({
       success: true,
@@ -325,11 +380,6 @@ const importLeads = async (req, res) => {
     });
   } catch (err) {
     console.error("Import Error:", err);
-    if (t) {
-      try {
-        await t.rollback();
-      } catch (_) {}
-    }
     return res.status(500).json({ success: false, error: "Error importing leads." });
   }
 };
