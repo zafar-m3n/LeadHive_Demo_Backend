@@ -177,11 +177,50 @@ const importLeads = async (req, res) => {
     leads.forEach((row, idx) => {
       const r = row || {};
 
+      const firstName = sanitizeStr(r.first_name);
+      const lastName = sanitizeStr(r.last_name);
+      const company = sanitizeStr(r.company);
+      const country = sanitizeStr(r.country);
+      const status = sanitizeStr(r.status);
+      const source = sanitizeStr(r.source);
+      const campaignValue = sanitizeStr(r.campaign);
+      const noteBody = sanitizeStr(r.notes);
+
       let email = sanitizeStr(r.email).toLowerCase();
       if (email === "") email = null;
 
       const phoneRaw = sanitizeStr(r.phone) || null;
       const phoneNorm = phoneRaw ? normalizePhoneDigits(phoneRaw) : null;
+
+      const isEmptyRow =
+        !firstName &&
+        !lastName &&
+        !company &&
+        !email &&
+        !phoneRaw &&
+        !country &&
+        !status &&
+        !source &&
+        !campaignValue &&
+        !noteBody;
+
+      const hasName = !!firstName || !!lastName;
+      const hasContactMethod = !!email || !!phoneNorm;
+
+      if (isEmptyRow) {
+        notes.push({ index: idx, note: "empty_row" });
+        return;
+      }
+
+      if (!hasContactMethod) {
+        notes.push({ index: idx, note: "missing_contact_method" });
+        return;
+      }
+
+      if (!hasName) {
+        notes.push({ index: idx, email, phone: phoneRaw, note: "missing_name" });
+        return;
+      }
 
       if (email && !validator.isEmail(email)) {
         notes.push({ index: idx, email, note: "invalid_email_format" });
@@ -203,13 +242,13 @@ const importLeads = async (req, res) => {
       if (phoneNorm) seenPhones.add(phoneNorm);
 
       let st = null;
-      const rStatus = sanitizeStr(r.status).toLowerCase();
+      const rStatus = status.toLowerCase();
 
       if (rStatus) st = statusMap.get(rStatus);
       if (!st) st = defaultStatus;
 
       let src = null;
-      const rSource = sanitizeStr(r.source).toLowerCase();
+      const rSource = source.toLowerCase();
 
       if (rSource) {
         src = sourceMap.get(rSource);
@@ -220,7 +259,7 @@ const importLeads = async (req, res) => {
       }
 
       let campaign = null;
-      const rCampaign = sanitizeStr(r.campaign).toLowerCase();
+      const rCampaign = campaignValue.toLowerCase();
 
       if (rCampaign) {
         campaign = campaignMap.get(rCampaign);
@@ -230,17 +269,15 @@ const importLeads = async (req, res) => {
         campaign = defaultCampaign;
       }
 
-      const noteBody = sanitizeStr(r.notes);
-
       prepared.push({
         _rowIndex: idx,
-        first_name: sanitizeStr(r.first_name) || null,
-        last_name: sanitizeStr(r.last_name) || null,
-        company: sanitizeStr(r.company) || null,
+        first_name: firstName || null,
+        last_name: lastName || null,
+        company: company || null,
         email,
         phone: phoneRaw,
         _phoneNorm: phoneNorm,
-        country: sanitizeStr(r.country) || null,
+        country: country || null,
         status_id: st ? st.id : null,
         source_id: src ? src.id : null,
         campaign_id: campaign ? campaign.id : null,
@@ -362,7 +399,7 @@ const importLeads = async (req, res) => {
     if (createdLeads.length === 0) {
       return res.status(409).json({
         success: false,
-        error: "All rows are duplicates or invalid (by email/phone).",
+        error: "All rows are duplicates or invalid.",
         details: { notes },
       });
     }
@@ -405,11 +442,20 @@ const getTemplateSchema = async (req, res) => {
         campaign: "Choose Fallback Campaign",
       },
       duplicate_check: "email_or_phone (phone compared by digits-only)",
+      required_rules: [
+        "A valid lead must have a first name or last name.",
+        "A valid lead must have at least one contact method: phone or email.",
+        "Company, country, source, campaign, status, and notes do not count as lead identifiers.",
+      ],
       notes: [
+        "Completely empty rows are skipped.",
+        "Rows without first_name and last_name are skipped.",
+        "Rows without both phone and email are skipped.",
         "If status is missing or invalid, 'new' is used.",
         "If source is missing or invalid, fallback source is used when provided.",
         "If campaign is missing or invalid, fallback campaign is used when provided.",
         "Unknown sources are created automatically (value = lowercase_with_underscores, label = original).",
+        "Unknown campaigns are created automatically (value = lowercase_with_underscores, label = original).",
         "Duplicates are detected by email OR phone; phone is normalized to digits-only for comparison.",
         "Rows with invalid email format are skipped.",
         "If a row includes 'notes', it is saved as the first note on that lead.",
