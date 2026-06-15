@@ -40,7 +40,7 @@ const authMiddleware = (req, res, next) => {
       if (clientIp !== OFFICE_STATIC_IP) {
         return res.status(403).json({
           success: false,
-          error: "Agents can only access the CRM from the office network.",
+          error: "Unauthorized agent access.",
         });
       }
     }

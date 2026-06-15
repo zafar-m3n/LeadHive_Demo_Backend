@@ -102,7 +102,7 @@ const login = async (req, res) => {
     if (!isMatch) return resError(res, "Invalid credentials", 401);
 
     if (!canUserAccessFromIp(user, req)) {
-      return resError(res, "Agents can only access the CRM from the office network", 403);
+      return resError(res, "Unauthorized agent access", 403);
     }
 
     const token = generateToken(user);
