@@ -1,6 +1,18 @@
 const jwt = require("jsonwebtoken");
 require("dotenv").config();
 
+const OFFICE_STATIC_IP = process.env.NODE_LEADHIVE_OFFICE_STATIC_IP;
+
+const getClientIp = (req) => {
+  const forwardedFor = req.headers["x-forwarded-for"];
+
+  if (forwardedFor) {
+    return forwardedFor.split(",")[0].trim().replace("::ffff:", "");
+  }
+
+  return req.socket.remoteAddress?.replace("::ffff:", "");
+};
+
 const authMiddleware = (req, res, next) => {
   try {
     const authHeader = req.headers["authorization"];
@@ -22,7 +34,18 @@ const authMiddleware = (req, res, next) => {
       role: decoded.role,
     };
 
-    next();
+    if (req.user.role !== "admin") {
+      const clientIp = getClientIp(req);
+
+      if (clientIp !== OFFICE_STATIC_IP) {
+        return res.status(403).json({
+          success: false,
+          error: "Agents can only access the CRM from the office network.",
+        });
+      }
+    }
+
+    return next();
   } catch (err) {
     console.error("Auth Error:", err.message);
     return res.status(401).json({

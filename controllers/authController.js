@@ -7,6 +7,7 @@ const { resSuccess, resError } = require("../utils/responseUtil");
 
 const BCRYPT_ROUNDS = parseInt(process.env.NODE_LEADHIVE_BCRYPT_SALT_ROUNDS || "10", 10);
 const JWT_SECRET = process.env.NODE_LEADHIVE_JWT_SECRET;
+const OFFICE_STATIC_IP = process.env.NODE_LEADHIVE_OFFICE_STATIC_IP;
 
 const generateToken = (user) => {
   return jwt.sign(
@@ -18,6 +19,28 @@ const generateToken = (user) => {
     JWT_SECRET,
     { expiresIn: "1d" },
   );
+};
+
+const getClientIp = (req) => {
+  const forwardedFor = req.headers["x-forwarded-for"];
+
+  if (forwardedFor) {
+    return forwardedFor.split(",")[0].trim().replace("::ffff:", "");
+  }
+
+  return req.socket.remoteAddress?.replace("::ffff:", "");
+};
+
+const canUserAccessFromIp = (user, req) => {
+  const roleValue = user.Role ? user.Role.value : null;
+
+  if (roleValue === "admin") {
+    return true;
+  }
+
+  const clientIp = getClientIp(req);
+
+  return clientIp === OFFICE_STATIC_IP;
 };
 
 const sanitizeUser = (user) => {
@@ -77,6 +100,10 @@ const login = async (req, res) => {
 
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) return resError(res, "Invalid credentials", 401);
+
+    if (!canUserAccessFromIp(user, req)) {
+      return resError(res, "Agents can only access the CRM from the office network", 403);
+    }
 
     const token = generateToken(user);
 
