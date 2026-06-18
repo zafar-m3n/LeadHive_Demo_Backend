@@ -94,62 +94,83 @@ const bulkAssign = async (req, res) => {
     if (!Array.isArray(lead_ids) || !lead_ids.length) {
       return resError(res, "lead_ids[] is required.", 400);
     }
-    if (!assignee_id) return resError(res, "assignee_id is required.", 400);
+
+    if (!assignee_id) {
+      return resError(res, "assignee_id is required.", 400);
+    }
 
     let targetStatus = null;
     let shouldReassignToAdmin = false;
 
-    // Optional: validate status if provided
     if (status_id !== undefined && status_id !== null) {
       targetStatus = await LeadStatus.findByPk(status_id);
-      if (!targetStatus) return resError(res, "Target status not found.", 404);
+
+      if (!targetStatus) {
+        return resError(res, "Target status not found.", 404);
+      }
 
       const targetStatusValue = String(targetStatus.value || "").toLowerCase();
       shouldReassignToAdmin = ["converted", "invalid_number"].includes(targetStatusValue);
     }
 
-    // Validate roles
     const assigneeRole = await getUserRoleValue(assignee_id);
-    if (!assigneeRole) return resError(res, "Assignee not found.", 404);
+
+    if (!assigneeRole) {
+      return resError(res, "Assignee not found.", 404);
+    }
 
     if (actorRole === "admin") {
-      // Admin can assign to anyone
+      // Admin can assign to anyone.
     } else if (actorRole === "manager") {
       if (!SALES_LIKE_ROLES.includes(assigneeRole)) {
         return resError(res, "Manager can only bulk-assign to sales reps or retention agents.", 403);
       }
+
       const ok = await isRepUnderManager(actorId, assignee_id);
-      if (!ok) return resError(res, "Selected agent is not in your managed teams.", 403);
+
+      if (!ok) {
+        return resError(res, "Selected agent is not in your managed teams.", 403);
+      }
     } else {
       return resError(res, "Forbidden.", 403);
     }
 
-    // Validate that requested leads exist
     const leads = await Lead.findAll({
       where: { id: { [Op.in]: lead_ids } },
-      attributes: ["id"],
+      attributes: ["id", "status_id"],
+      include: [
+        {
+          model: LeadStatus,
+          attributes: ["id", "value", "label"],
+        },
+      ],
     });
-    const foundIds = new Set(leads.map((l) => l.id));
+
+    const foundIds = new Set(leads.map((lead) => lead.id));
     const missing = lead_ids.filter((id) => !foundIds.has(id));
 
-    // Latest assignees for found leads
+    const leadById = new Map();
+
+    for (const lead of leads) {
+      const plainLead = lead.get({ plain: true });
+      leadById.set(Number(plainLead.id), plainLead);
+    }
+
     const latestMap = await getLatestAssignmentsMap([...foundIds]);
 
-    // Build worklist (which leads will actually receive a new assignment row)
     const toCreate = [];
-    const idsToAffect = []; // IDs that will get the new assignment (and thus optional status update)
-    const skipped = []; // { id, reason }
+    const idsToAffect = [];
+    const skipped = [];
 
     for (const id of foundIds) {
       const current = latestMap.get(id) ?? null;
 
-      // If overwrite=false and a different assignee exists, skip
-      if (!overwrite && current && current !== assignee_id) {
+      if (!overwrite && current && Number(current) !== Number(assignee_id)) {
         skipped.push({ id, reason: "already_assigned" });
         continue;
       }
-      // If overwrite=false and already assigned to target, skip (no-op)
-      if (!overwrite && current === assignee_id) {
+
+      if (!overwrite && Number(current) === Number(assignee_id)) {
         skipped.push({ id, reason: "already_assigned_to_target" });
         continue;
       }
@@ -159,6 +180,7 @@ const bulkAssign = async (req, res) => {
         assignee_id,
         assigned_by: actorId,
       });
+
       idsToAffect.push(id);
     }
 
@@ -167,19 +189,12 @@ const bulkAssign = async (req, res) => {
 
     if (toCreate.length) {
       await sequelize.transaction(async (t) => {
-        // 1) Insert assignment history rows (chunked)
-        const CHUNK = 1000;
-        for (let i = 0; i < toCreate.length; i += CHUNK) {
-          const slice = toCreate.slice(i, i + CHUNK);
-          await LeadAssignment.bulkCreate(slice, { transaction: t });
-          created += slice.length;
-        }
+        const adminAssigningToAgent = actorRole === "admin" && SALES_LIKE_ROLES.includes(assigneeRole);
 
-        // 2) Match single-lead update behavior:
-        //    If admin assigns to an agent and the lead has no previous assignments OR no notes,
-        //    set status to "assigned".
-        if (actorRole === "admin" && !shouldReassignToAdmin && idsToAffect.length > 0) {
-          const assignedStatus = await LeadStatus.findOne({
+        let assignedStatus = null;
+
+        if (adminAssigningToAgent && !shouldReassignToAdmin) {
+          assignedStatus = await LeadStatus.findOne({
             where: { value: "assigned" },
             transaction: t,
           });
@@ -187,72 +202,75 @@ const bulkAssign = async (req, res) => {
           if (!assignedStatus) {
             throw new Error("Assigned status not found");
           }
+        }
 
-          const assignmentCounts = await LeadAssignment.findAll({
-            where: { lead_id: { [Op.in]: idsToAffect } },
-            attributes: ["lead_id", [sequelize.fn("COUNT", sequelize.col("id")), "count"]],
-            group: ["lead_id"],
-            transaction: t,
-          });
+        const noteCounts = await LeadNote.findAll({
+          where: { lead_id: { [Op.in]: idsToAffect } },
+          attributes: ["lead_id", [sequelize.fn("COUNT", sequelize.col("id")), "count"]],
+          group: ["lead_id"],
+          transaction: t,
+        });
 
-          const noteCounts = await LeadNote.findAll({
-            where: { lead_id: { [Op.in]: idsToAffect } },
-            attributes: ["lead_id", [sequelize.fn("COUNT", sequelize.col("id")), "count"]],
-            group: ["lead_id"],
-            transaction: t,
-          });
+        const noteCountMap = new Map();
 
-          const assignmentCountMap = new Map();
-          const noteCountMap = new Map();
+        for (const row of noteCounts) {
+          noteCountMap.set(Number(row.lead_id), Number(row.get("count") || 0));
+        }
 
-          for (const row of assignmentCounts) {
-            assignmentCountMap.set(Number(row.lead_id), Number(row.get("count") || 0));
+        const idsToSetAssigned = [];
+        const idsToSetProvidedStatus = [];
+
+        for (const id of idsToAffect) {
+          const lead = leadById.get(Number(id));
+          const currentStatusValue = String(lead?.LeadStatus?.value || "").toLowerCase();
+          const existingNoteCount = noteCountMap.get(Number(id)) || 0;
+
+          const isCurrentlyNew = currentStatusValue === "new";
+          const hasNoNotes = existingNoteCount === 0;
+
+          if (adminAssigningToAgent && !shouldReassignToAdmin && isCurrentlyNew && hasNoNotes) {
+            idsToSetAssigned.push(id);
+          } else if (status_id !== undefined && status_id !== null) {
+            idsToSetProvidedStatus.push(id);
           }
+        }
 
-          for (const row of noteCounts) {
-            noteCountMap.set(Number(row.lead_id), Number(row.get("count") || 0));
-          }
+        const CHUNK = 1000;
 
-          const idsToSetAssigned = [];
-          const idsToSetProvidedStatus = [];
+        for (let i = 0; i < toCreate.length; i += CHUNK) {
+          const slice = toCreate.slice(i, i + CHUNK);
+          await LeadAssignment.bulkCreate(slice, { transaction: t });
+          created += slice.length;
+        }
 
-          for (const id of idsToAffect) {
-            const assignmentCountAfterCreate = assignmentCountMap.get(Number(id)) || 0;
-            const existingAssignmentCount = Math.max(assignmentCountAfterCreate - 1, 0);
-            const existingNoteCount = noteCountMap.get(Number(id)) || 0;
-
-            const hasNoPreviousAssignments = existingAssignmentCount === 0;
-            const hasNoNotes = existingNoteCount === 0;
-
-            if (hasNoPreviousAssignments && hasNoNotes) {
-              idsToSetAssigned.push(id);
-            } else if (status_id !== undefined && status_id !== null) {
-              idsToSetProvidedStatus.push(id);
-            }
-          }
-
-          if (idsToSetAssigned.length > 0) {
-            const [count] = await Lead.update(
-              { status_id: assignedStatus.id, updated_by: actorId },
-              { where: { id: { [Op.in]: idsToSetAssigned } }, transaction: t },
-            );
-            statusUpdated += count;
-          }
-
-          if (idsToSetProvidedStatus.length > 0) {
-            const [count] = await Lead.update(
-              { status_id, updated_by: actorId },
-              { where: { id: { [Op.in]: idsToSetProvidedStatus } }, transaction: t },
-            );
-            statusUpdated += count;
-          }
-        } else if (status_id !== undefined && status_id !== null) {
-          // 3) Original optional status update behavior
+        if (idsToSetAssigned.length > 0) {
           const [count] = await Lead.update(
-            { status_id, updated_by: actorId },
-            { where: { id: { [Op.in]: idsToAffect } }, transaction: t },
+            {
+              status_id: assignedStatus.id,
+              updated_by: actorId,
+            },
+            {
+              where: { id: { [Op.in]: idsToSetAssigned } },
+              transaction: t,
+            },
           );
-          statusUpdated = count;
+
+          statusUpdated += count;
+        }
+
+        if (idsToSetProvidedStatus.length > 0) {
+          const [count] = await Lead.update(
+            {
+              status_id,
+              updated_by: actorId,
+            },
+            {
+              where: { id: { [Op.in]: idsToSetProvidedStatus } },
+              transaction: t,
+            },
+          );
+
+          statusUpdated += count;
         }
       });
     }
@@ -260,7 +278,7 @@ const bulkAssign = async (req, res) => {
     return resSuccess(res, {
       total_requested: lead_ids.length,
       updated: created,
-      status_updated: statusUpdated, // how many had status changed
+      status_updated: statusUpdated,
       skipped,
       missing,
       assignee_id,

@@ -75,7 +75,7 @@ const getManagers = async (req, res) => {
 const getManagersAndAdmins = async (req, res) => {
   try {
     const users = await User.findAll({
-      where: { is_active: true },
+      where: { is_active: true, id: { [Op.ne]: 1 } },
       include: [
         {
           model: Role,
@@ -215,7 +215,7 @@ const getAssignableUsersForManager = async (req, res) => {
     }
 
     const admins = await User.findAll({
-      where: { is_active: true },
+      where: { is_active: true, id: { [Op.ne]: 1 } },
       include: [{ model: Role, where: { value: "admin" }, attributes: [] }],
       attributes: ["id", "full_name", "email"],
     });
@@ -395,7 +395,7 @@ const getAssignees = async (req, res) => {
     }
 
     const users = await User.findAll({
-      where: { is_active: true },
+      where: { is_active: true, id: { [Op.ne]: 1 } },
       attributes: ["id", "full_name", "email"],
       order: [
         ["full_name", "ASC"],
