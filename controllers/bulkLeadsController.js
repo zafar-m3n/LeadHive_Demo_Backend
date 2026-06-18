@@ -304,7 +304,7 @@ const getAssignableTargets = async (req, res) => {
 
     if (role === "admin") {
       const users = await User.findAll({
-        where: { is_active: true },
+        where: { is_active: true, id: { [Op.ne]: 1 } },
         include: [{ model: Role, attributes: [] }],
         attributes: ["id", "full_name", "email"],
         order: [["full_name", "ASC"]],
@@ -323,7 +323,7 @@ const getAssignableTargets = async (req, res) => {
 
       // distinct sales reps/retention agents in those teams
       const reps = await User.findAll({
-        where: { is_active: true },
+        where: { is_active: true, id: { [Op.ne]: 1 } },
         include: [
           { model: Role, where: { value: { [Op.in]: SALES_LIKE_ROLES } }, attributes: [] },
           {
