@@ -91,6 +91,8 @@ const bulkAssign = async (req, res) => {
     const actorId = req.user?.id;
     const actorRole = req.user?.role; // "admin" | "manager" | "sales_rep" | "retention"
 
+    const hasProvidedStatus = status_id !== undefined && status_id !== null && String(status_id).trim() !== "";
+
     if (!Array.isArray(lead_ids) || !lead_ids.length) {
       return resError(res, "lead_ids[] is required.", 400);
     }
@@ -100,17 +102,13 @@ const bulkAssign = async (req, res) => {
     }
 
     let targetStatus = null;
-    let shouldReassignToAdmin = false;
 
-    if (status_id !== undefined && status_id !== null) {
+    if (hasProvidedStatus) {
       targetStatus = await LeadStatus.findByPk(status_id);
 
       if (!targetStatus) {
         return resError(res, "Target status not found.", 404);
       }
-
-      const targetStatusValue = String(targetStatus.value || "").toLowerCase();
-      shouldReassignToAdmin = ["converted", "invalid_number"].includes(targetStatusValue);
     }
 
     const assigneeRole = await getUserRoleValue(assignee_id);
@@ -193,7 +191,7 @@ const bulkAssign = async (req, res) => {
 
         let assignedStatus = null;
 
-        if (adminAssigningToAgent && !shouldReassignToAdmin) {
+        if (adminAssigningToAgent && !hasProvidedStatus) {
           assignedStatus = await LeadStatus.findOne({
             where: { value: "assigned" },
             transaction: t,
@@ -228,10 +226,10 @@ const bulkAssign = async (req, res) => {
           const isCurrentlyNew = currentStatusValue === "new";
           const hasNoNotes = existingNoteCount === 0;
 
-          if (adminAssigningToAgent && !shouldReassignToAdmin && isCurrentlyNew && hasNoNotes) {
-            idsToSetAssigned.push(id);
-          } else if (status_id !== undefined && status_id !== null) {
+          if (hasProvidedStatus) {
             idsToSetProvidedStatus.push(id);
+          } else if (adminAssigningToAgent && isCurrentlyNew && hasNoNotes) {
+            idsToSetAssigned.push(id);
           }
         }
 
@@ -283,7 +281,7 @@ const bulkAssign = async (req, res) => {
       missing,
       assignee_id,
       overwrite: !!overwrite,
-      ...(status_id !== undefined ? { status_id } : {}),
+      ...(hasProvidedStatus ? { status_id } : {}),
     });
   } catch (err) {
     console.error("BulkAssign Error:", err);

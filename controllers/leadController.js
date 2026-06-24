@@ -60,8 +60,13 @@ const createLead = async (req, res) => {
       return resError(res, "status_id is required", 400);
     }
 
-    const emailNormalized = email ? String(email).toLowerCase() : null;
-    const phoneNorm = phone ? normalizePhoneDigits(phone) : null;
+    const cleanEmail = typeof email === "string" && email.trim() === "" ? null : email;
+    const cleanPhone = typeof phone === "string" && phone.trim() === "" ? null : phone;
+    const cleanCompany = typeof company === "string" && company.trim() === "" ? null : company;
+    const cleanCountry = typeof country === "string" && country.trim() === "" ? null : country;
+
+    const emailNormalized = cleanEmail ? String(cleanEmail).trim().toLowerCase() : null;
+    const phoneNorm = cleanPhone ? normalizePhoneDigits(cleanPhone) : null;
 
     const whereClauses = [];
 
@@ -95,10 +100,10 @@ const createLead = async (req, res) => {
       {
         first_name,
         last_name,
-        company,
-        email,
-        phone,
-        country,
+        company: cleanCompany,
+        email: emailNormalized,
+        phone: cleanPhone,
+        country: cleanCountry,
         status_id,
         source_id,
         campaign_id,
