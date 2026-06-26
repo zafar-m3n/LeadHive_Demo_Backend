@@ -129,19 +129,18 @@ const buildSummary = async ({ assigneeIds = null, recentLimit = 10, includeAdmin
 
     const { monthStart, nextMonthStart } = getCurrentMonthRange();
 
+    const newStatus = allStatuses.find((s) => String(s.value || "").toLowerCase() === "new");
+    const newStatusId = newStatus?.id ?? null;
+
     const [unassignedLeadsCount, newThisWeekCount, retiredTotalCount, retiredThisMonthCount] = await Promise.all([
       Lead.count({
-        include: [
-          {
-            model: LeadAssignment,
-            as: "LeadAssignments",
-            attributes: [],
-            required: true,
-            where: { assignee_id: adminUserId },
-          },
-        ],
-        distinct: true,
-        col: "id",
+        where: newStatusId
+          ? {
+              status_id: newStatusId,
+            }
+          : {
+              id: null,
+            },
       }),
 
       Lead.count({
