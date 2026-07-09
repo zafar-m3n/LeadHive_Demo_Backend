@@ -1,8 +1,7 @@
 const { Lead, LeadStatus, LeadSource, Campaign, LeadAssignment, Team, TeamMember, TeamManager } = require("../models");
 const { Op, fn, col, literal } = require("sequelize");
 const { resSuccess, resError } = require("../utils/responseUtil");
-
-const RETIRED_STATUS_ID = 12;
+const { isRetiredStatusValue } = require("../jobs/leadRetirementJob");
 
 // ==============================
 // Shared helpers
@@ -132,6 +131,8 @@ const buildSummary = async ({ assigneeIds = null, recentLimit = 10, includeAdmin
     const newStatus = allStatuses.find((s) => String(s.value || "").toLowerCase() === "new");
     const newStatusId = newStatus?.id ?? null;
 
+    const retiredStatusIds = allStatuses.filter((s) => isRetiredStatusValue(s.value)).map((s) => s.id);
+
     const [unassignedLeadsCount, newThisWeekCount, retiredTotalCount, retiredThisMonthCount] = await Promise.all([
       Lead.count({
         where: newStatusId
@@ -156,13 +157,13 @@ const buildSummary = async ({ assigneeIds = null, recentLimit = 10, includeAdmin
 
       Lead.count({
         where: {
-          status_id: RETIRED_STATUS_ID,
+          status_id: retiredStatusIds.length ? { [Op.in]: retiredStatusIds } : null,
         },
       }),
 
       Lead.count({
         where: {
-          status_id: RETIRED_STATUS_ID,
+          status_id: retiredStatusIds.length ? { [Op.in]: retiredStatusIds } : null,
           updated_at: {
             [Op.gte]: monthStart,
             [Op.lt]: nextMonthStart,

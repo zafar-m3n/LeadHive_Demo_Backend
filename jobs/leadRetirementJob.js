@@ -1,13 +1,18 @@
 const { Op, literal } = require("sequelize");
-const { Lead, LeadAssignment, User, Role, Notification } = require("../models");
+const { Lead, LeadAssignment, LeadStatus, User, Role, Notification } = require("../models");
 const { sequelize } = require("../config/database");
 
-const RETIRED_STATUS_ID = 12;
 const REGISTERED_STATUS_ID = 10;
 const CONVERTED_STATUS_ID = 11;
 
 const SALES_ROLE_VALUE = "sales_rep";
 const REASSIGN_ALLOWED_ROLES = ["admin", "manager"];
+const RETIRED_VALUE_PREFIX = "retired_";
+const RETIRED_VALUE = "retired";
+
+function isRetiredStatusValue(value) {
+  return value === RETIRED_VALUE || String(value || "").startsWith(RETIRED_VALUE_PREFIX);
+}
 
 const LATEST_ASSIGNMENT_IDS = literal(`
   (
@@ -90,11 +95,22 @@ async function getEligibleRetirementLeads(cutoffDate, transaction = null) {
   return Lead.findAll({
     where: {
       status_id: {
-        [Op.notIn]: [REGISTERED_STATUS_ID, CONVERTED_STATUS_ID, RETIRED_STATUS_ID],
+        [Op.notIn]: [REGISTERED_STATUS_ID, CONVERTED_STATUS_ID],
       },
       [Op.and]: [buildActivityCutoffCondition(cutoffDate)],
     },
     include: [
+      {
+        model: LeadStatus,
+        required: true,
+        attributes: ["id", "value", "label"],
+        where: {
+          value: {
+            [Op.notLike]: `${RETIRED_VALUE_PREFIX}%`,
+            [Op.ne]: RETIRED_VALUE,
+          },
+        },
+      },
       {
         model: LeadAssignment,
         required: true,
@@ -129,6 +145,38 @@ async function getEligibleRetirementLeads(cutoffDate, transaction = null) {
   });
 }
 
+async function getOrCreateRetiredStatus(originalStatus, transaction) {
+  const value = `${RETIRED_VALUE_PREFIX}${originalStatus.value}`.slice(0, 40);
+  const label = `Retired ${originalStatus.label}`.slice(0, 80);
+
+  const [status] = await LeadStatus.findOrCreate({
+    where: { value },
+    defaults: { value, label },
+    transaction,
+  });
+
+  return status;
+}
+
+function groupLeadsByStatus(leads) {
+  const groups = new Map();
+
+  for (const lead of leads) {
+    const statusId = lead.status_id;
+
+    if (!groups.has(statusId)) {
+      groups.set(statusId, {
+        originalStatus: lead.LeadStatus,
+        leadIds: [],
+      });
+    }
+
+    groups.get(statusId).leadIds.push(lead.id);
+  }
+
+  return groups;
+}
+
 async function createRetirementNotification(reassignmentUser, retiredCount, retirementDays) {
   if (!retiredCount || retiredCount <= 0) {
     return false;
@@ -148,11 +196,19 @@ async function previewLeadRetirement() {
   const cutoffDate = getCutoffDate(retirementDays);
   const reassignmentUser = await getReassignmentUser();
   const eligibleLeads = await getEligibleRetirementLeads(cutoffDate);
+  const groups = groupLeadsByStatus(eligibleLeads);
+
+  const statusBreakdown = Array.from(groups.values()).map((group) => ({
+    original_status: group.originalStatus.label,
+    retired_status: `Retired ${group.originalStatus.label}`,
+    count: group.leadIds.length,
+  }));
 
   return {
     retirement_days: retirementDays,
     cutoff_date: cutoffDate,
     eligible_count: eligibleLeads.length,
+    status_breakdown: statusBreakdown,
     reassignment_user: {
       id: reassignmentUser.id,
       full_name: reassignmentUser.full_name,
@@ -173,31 +229,42 @@ async function runLeadRetirement() {
   try {
     const eligibleLeads = await getEligibleRetirementLeads(cutoffDate, t);
     const leadIds = eligibleLeads.map((lead) => lead.id);
+    const groups = groupLeadsByStatus(eligibleLeads);
 
     let retiredCount = 0;
     let assignmentCreatedCount = 0;
+    const statusBreakdown = [];
 
     if (leadIds.length > 0) {
-      const [updatedCount] = await Lead.update(
-        {
-          status_id: RETIRED_STATUS_ID,
-          updated_by: reassignmentUser.id,
-          updated_at: retiredAt,
-        },
-        {
-          where: {
-            id: {
-              [Op.in]: leadIds,
-            },
-            status_id: {
-              [Op.notIn]: [REGISTERED_STATUS_ID, CONVERTED_STATUS_ID, RETIRED_STATUS_ID],
-            },
-          },
-          transaction: t,
-        },
-      );
+      for (const [originalStatusId, group] of groups) {
+        const retiredStatus = await getOrCreateRetiredStatus(group.originalStatus, t);
 
-      retiredCount = updatedCount;
+        const [updatedCount] = await Lead.update(
+          {
+            status_id: retiredStatus.id,
+            updated_by: reassignmentUser.id,
+            updated_at: retiredAt,
+          },
+          {
+            where: {
+              id: {
+                [Op.in]: group.leadIds,
+              },
+              status_id: originalStatusId,
+            },
+            transaction: t,
+          },
+        );
+
+        retiredCount += updatedCount;
+
+        statusBreakdown.push({
+          original_status: group.originalStatus.label,
+          retired_status: retiredStatus.label,
+          retired_status_id: retiredStatus.id,
+          count: updatedCount,
+        });
+      }
 
       const assignmentRows = leadIds.map((leadId) => ({
         lead_id: leadId,
@@ -228,6 +295,7 @@ async function runLeadRetirement() {
       eligible_count: leadIds.length,
       retired_count: retiredCount,
       assignment_created_count: assignmentCreatedCount,
+      status_breakdown: statusBreakdown,
       notification_created: notificationCreated,
       reassignment_user: {
         id: reassignmentUser.id,
@@ -248,4 +316,5 @@ async function runLeadRetirement() {
 module.exports = {
   previewLeadRetirement,
   runLeadRetirement,
+  isRetiredStatusValue,
 };
