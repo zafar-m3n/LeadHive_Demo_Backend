@@ -40,11 +40,14 @@ function buildActivityCutoffCondition(cutoffDate) {
   const escapedCutoffDate = sequelize.escape(cutoffDate);
 
   return literal(`
-    COALESCE(
-      (
-        SELECT MAX(ln.created_at)
-        FROM lead_notes ln
-        WHERE ln.lead_id = \`Lead\`.\`id\`
+    GREATEST(
+      COALESCE(
+        (
+          SELECT MAX(ln.created_at)
+          FROM lead_notes ln
+          WHERE ln.lead_id = \`Lead\`.\`id\`
+        ),
+        '1970-01-01'
       ),
       (
         SELECT la.assigned_at
